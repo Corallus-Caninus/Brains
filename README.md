@@ -5,29 +5,13 @@ an Artificial Neural Network framework built on Tensorflow-rs bindings for creat
 
 Currently all inputs and outputs are represented as flattend 1D rust Vecs.
 
+once the following TODO is finished this will be updated on crates and can be considered a fledgling framework (v1.X.X):
 # TODO: 
+Refactor everything to use traits and the builder pattern to get a more Keras sequential API user interface and something that can be built upon and implemented more easily onto other frameworks later (e.g. libtorch).
 
-add more generic typing, currently f32 for parameters and u64 for architecture size is standard.
+create a dev Branch and pull into Master as a Release branch
 
-add more layers
-
-add a form of N dimensional convolution that maps to the 1D input vectors and hidden layers 
-
-formalize documentation for layers (unscaled architectures) as seen below.
-
-# Architectures
-## NormNet
-Research in Neural Networks without bias and gradient based connection dropout by utilizing per node normalization.
-
-It is hypothesized that neural networks struggle with transfer learning due to biases limiting their exploration of other local minimas.
-it is with this hypothesis that norm net came to exist, attempting to eliminate biases while also allowing networks to perform gradient based dropout.
-both gradient based dropout and normalized signals are thought to allow a network to recover previous minima and explore better given gradient descent 
-without having to checkpoint the model. This is due to a networks parameters being more continuous without bias' subtree partitions of the network 
-(nodes between two layers have certain signal "sweet spots" of expressivity for all non-linear activation functions).
-Sparsity of the weights due to connection dropout also has a bloom filter hashing effect (for lack of a better analogy) that leaves more parameters to represent 
-future domains outside of the initial trainning set.
-Because generalization is thought by many to be closely linked to transferability of a model (its ability to solve diverse problem sets) it is the aim 
-of this research to find networks that are able to generalize greater by being able to solve distinct problems with the same parameter set.
+Documentation. Docstrings and a project overview landing page that discusses the Mods.
 
 
 Please let me know what you think: ward.joshua92@yahoo.com
