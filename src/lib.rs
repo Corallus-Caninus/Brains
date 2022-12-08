@@ -1,3 +1,4 @@
+
 //TODO: allow this to fallback to TF-CPU for machines without GPU and possibly just do inference with a build script.
 //TODO: floats stink norm net is an attempt to realizing rot net and uint8 operations with bounded functions while retaining all the flaws in DNNs.. (go back to rot net at some point)
 //TODO: rayon all the things
@@ -11,9 +12,9 @@
 
 //allow unstable features
 // #![feature(int_log)]
+
 mod layers;
 mod activations;
-
 use log;
 use serde::{Serialize, Deserialize};
 use serde_derive::{Serialize, Deserialize};
@@ -68,12 +69,83 @@ use tensorflow::REGRESS_METHOD_NAME;
 use tensorflow::REGRESS_OUTPUTS;
 use uuid::Uuid;
 //function types
-use layers::Layer;
-use activations::Activation;
+//@DEPRECATED, we are removing function types in favor of trait bounds
+//use layers::Layer;
+use layers::*;
+//TODO: @DEPRECATED
+//use activations::Activation;
+//pub mod activations;
+//pub mod layers;
+use activations::*;
+use anyhow::anyhow;
+//#[macro_use]
+//extern crate derive_builder;
+extern crate tensorflow;
+
+//TODO: refactor with builder pattern for RL, checkpointing and feedback network once tested and working.
+//      consider using a builder struct that is a master class for new constructor, some of
+//      this isnt initialized, only need a builder for user parameters
+//builder should also take functions for layers and activations as a functional struct, possibly
+//reuse architecture for this but rename and only struct ActivatedLayer
+
+//TODO: builder takes trait bounds on ActivatedLayer as a form generically returning self like iter()
+//pub struct BrainBuilder{
+//    name: String,
+//    input_size: u64,
+//    output_size: u64,
+//    //Number of neurons in each layer
+//    layer_width: u64,
+//    //Number of layers in the network
+//    layer_height: u64,
+//    layer: Layer,
+//    activation: Activation,
+//    learning_rate: f32,
+//    error_power: f32,
+//}
+//impl BrainBuilder{
+//    pub fn name(&mut self, name: String) -> &mut Self {
+//        self.name = name;
+//        self
+//    }
+//    pub fn input_size(&mut self, input_size: u64) -> &mut Self {
+//        self.input_size = input_size;
+//        self
+//    }
+//    pub fn output_size(&mut self, output_size: u64) -> &mut Self {
+//        self.output_size = output_size;
+//        self
+//    }
+//    pub fn layer_width(&mut self, layer_width: u64) -> &mut Self {
+//        self.layer_width = layer_width;
+//        self
+//    }
+//    pub fn layer_height(&mut self, layer_height: u64) -> &mut Self {
+//        self.layer_height = layer_height;
+//        self
+//    }
+//    pub fn layer(&mut self, layer: Layer) -> &mut Self {
+//        self.layer = layer;
+//        self
+//    }
+//    pub fn activation(&mut self, activation: Activation) -> &mut Self {
+//        self.activation = activation;
+//        self
+//    }
+//    pub fn learning_rate(&mut self, learning_rate: f32) -> &mut Self {
+//        self.learning_rate = learning_rate;
+//        self
+//    }
+//    pub fn error_power(&mut self, error_power: f32) -> &mut Self {
+//        self.error_power = error_power;
+//        self
+//    }
+//    pub fn build(&self) -> Result<Brain, Status> {
+//        Brain::new(self.name.as_str(), self.input_size, self.output_size, self.layer_width, self.layer_height, self.layer, self.activation, self.learning_rate, self.error_power)
+//    }
+//}
 
 //TODO: defaults such as learning rate
 pub struct Brain<'a> {
-    //TODO: refactor with builder pattern for RL, checkpointing and feedback network once tested and working.
     /// Tensorflow objects for user abstraction from Tensorflow
     scope: Scope,
     session: Session,
@@ -82,7 +154,7 @@ pub struct Brain<'a> {
     net_layers: Vec<Output>,
     ///all the trainable parameters of the network
     net_vars: Vec<Variable>,
-    ///Operations to interact with the graph (kept here for serialization)
+    ///Operation hooks to interact with the graph (kept here for serialization)
     Input: Operation,
     Label: Operation,
     Output_op: Operation,
@@ -114,75 +186,146 @@ pub struct Brain<'a> {
     checkpoint_name: Option<String>,
 }
 impl <'a>Brain <'a>{
-    //TODO: type safety: some of the meta-learning values should be 64 bit for overflow since we sum 32s etc.
-    pub fn new(
+    //TODO: type safety: use trait bounds to allow for using bigints etc for counting//indexing
+    //      types.
+    //pub fn new<Layer: BuildLayerTF + LayerBuilder + LayerAccessor>(
+    //TODO: what traits are needed for building?
+    pub fn new<Layer: BuildLayer+LayerAccessor+ConfigurableLayer>(
         name: &'a str,
-        input_size: u64,
-        output_size: u64,
+        //TODO: @DEPRECATED
+        //input_size: u64,
+        //output_size: u64,
+        //TODO: this is configured in each layer
         //Number of neurons in each layer
-        layer_width: u64,
+        //layer_width: u64,
         //Number of layers in the network
-        layer_height: u64,
-        layer: Layer,
-        activation: Activation,
+        //layer_height: u64,
+        //layer: Layer,
+        //TODO: a vec of layers here will suffice for now, but this will be a builder pattern as
+        //soon as possible
+        layers: Vec<Layer>,
+        //activation: Activation,
         learning_rate: f32,
         error_power: f32,
     ) -> Result<Brain<'a>, Status> {
         let mut scope = Scope::new_root_scope();
 
-        // TODO: consider inlining this since were encapsulating
+        //TODO: @DEPRECATED
+//        let Input = ops::Placeholder::new()
+//            .dtype(DataType::Float)
+//            .shape([1u64, input_size])
+//            .build(&mut scope.with_op_name("input"))?;
+//        let Label = ops::Placeholder::new()
+//            .dtype(DataType::Float)
+//            .shape([1u64, output_size])
+//            .build(&mut scope.with_op_name("label"))?;
+        //get from first and last layers instead
+        let mut input_size = layers[0].get_width();
+        let mut output_size = layers[0].get_width();
         let Input = ops::Placeholder::new()
             .dtype(DataType::Float)
             .shape([1u64, input_size])
             .build(&mut scope.with_op_name("input"))?;
         let Label = ops::Placeholder::new()
             .dtype(DataType::Float)
-            .shape([1u64, output_size])
+            .shape([1u64, layers[layers.len()-1].get_width()])
             .build(&mut scope.with_op_name("label"))?;
 
         //CONSTRUCT NETWORK
         //TODO: take a list of layers (at least two) and construct the network, 
         //      scaling/stretching order wise based on layer_height
         //TODO: extract this to a builder pattern for constructor readability.
+        //TODO: builder should also take a function that defines this, really we need the input and
+        //output to get all the checkpointing/trainning features. helper functions can make this
+        //function easier to define elsewhere
+        
+        //trainnable variables
         let mut net_vars = vec![];
+        //each layer as a TF Operation
         let mut net_layers = vec![];
 
         //initial layer
-        let (vars, cur_layer, _) = 
-        layer(Input.clone().into(), input_size, layer_width, 
-        //TODO: remove this pointer
-        &activation, &mut scope)?;
+        //TODO: this should be functional but in a way that makes sense. Use traits for future
+        //      proofing.
+        //Calling this as a function here doesnt make this simpler and is less readable compared to
+        //encapsulation with method chaining.
+        
+        //TODO: @DEPRECATED
+        //let (vars, cur_layer, _) = 
+//        layer(Input.clone().into(), input_size, layer_width, 
+//             //TODO: remove this pointer
+//             &activation, &mut scope)?;
+        //TODO: use a vec but eventually make this functional and elegant
+        //let parameters = layer.build_layer(&mut scope)?;
+        ////TODO: regex inline
+        //let vars = parameters.variables;
+        //let cur_layer = parameters.output;
 
-        net_vars.extend(vars);
-        net_layers.push(cur_layer.clone());
+        //net_vars.extend(vars);
+        //net_layers.push(cur_layer.clone());
 
-        let mut prev_layer = cur_layer;
-        //hidden layers
-        for i in 0..layer_height - 2 {
-            let (vars, cur_layer, _) = layer(prev_layer.clone().into(), layer_width, layer_width, 
-            &activation, &mut scope)?;
-            prev_layer = cur_layer.clone();
+        //let mut prev_layer = cur_layer;
+        ////hidden layers
+        //for i in 0..layer_height - 2 {
+        //    //TODO:@DEPRECATED
+        //    //let (vars, cur_layer, _) = layer(prev_layer.clone().into(), layer_width, layer_width, 
+        //    //&activation, &mut scope)?;
+        //    let parameters = layer.build_layer(&mut scope)?;
+        //    //TODO: regex inline
+        //    let vars = parameters.variables;
+        //    let cur_layer = parameters.output;
+        //    prev_layer = cur_layer.clone();
 
-            net_vars.extend(vars);
-            net_layers.push(cur_layer.clone());
-        }
+        //    net_vars.extend(vars);
+        //    net_layers.push(cur_layer.clone());
+        //}
 
-        //output layer 
-        let (vars, output, Output_op) = 
-        layer(
-            net_layers.last().unwrap().clone(),
-            layer_width,
-            output_size,
-            &activation,
-            &mut scope,
-        )?;
-        //NOTE: need net_vars and net_layers as return values
-        net_vars.extend(vars);
-        net_layers.push(output.clone());
+        ////output layer 
+        ////let (vars, output, Output_op) = 
+        ////layer(
+        ////    net_layers.last().unwrap().clone(),
+        ////    layer_width,
+        ////    output_size,
+        ////    &activation,
+        ////    &mut scope,
+        ////)?;
+        //let parameters = layer.build_layer(&mut scope)?;
+        //let vars = parameters.variables;
+        //let output = parameters.output;
+        //let Output_op = parameters.operation;
+
+        ////NOTE: need net_vars and net_layers as return values
+        //net_vars.extend(vars);
+        //net_layers.push(output.clone());
         //END OF CONSTRUCTING NETWORK
         //TODO: END OF EXTRACTION
 
-        let Output = output;
+        let mut layer_input_iter = Input.clone();
+        for mut layer in layers {
+            //TODO: assign Input to each layer. extract this to builder later
+            //TODO: this should already be done in layer builder 
+            //      (not the aformbentioned Brain builder)
+            //TODO: need to setup the Input hook in the builder.
+            //layer.get_input()?(layer_input_iter.clone().into());
+            
+            layer._input(layer_input_iter.clone());
+            layer._input_size(input_size);
+            input_size = layer.get_width();
+            output_size = layer.get_width();
+            layer._output_size(output_size);
+            //TODO: end of extraction routine
+
+            let parameters = layer.build_layer(&mut scope)?;
+            let vars = parameters.variables;
+            let output = parameters.output;
+
+            net_vars.extend(vars);
+            net_layers.push(output.clone());
+            
+            layer_input_iter = parameters.operation;
+        }
+        let Output = net_layers.last().unwrap().clone();
+        let Output_op = Output.operation.clone();
 
         let options = SessionOptions::new();
         let SavedModelSaver= RefCell::new(None);
@@ -237,7 +380,7 @@ impl <'a>Brain <'a>{
         }
         session.run(&mut run_args)?;
 
-        let mut init_norm_net = Brain {
+        let mut init_brain = Brain {
             name,
             scope,
             session: session,
@@ -258,10 +401,10 @@ impl <'a>Brain <'a>{
         };
 
         //initialize Brain save directory
-        fs::create_dir_all(init_norm_net.name).unwrap();
-        init_norm_net.save().unwrap();
+        fs::create_dir_all(init_brain.name).unwrap();
+        init_brain.save().unwrap();
 
-        Ok(init_norm_net)
+        Ok(init_brain)
     }
 
 
@@ -389,6 +532,8 @@ impl <'a>Brain <'a>{
                         ),
                     );
                     //NOTE: we only need this for reporting learning position for learning rate
+                    //TODO: should this be add_output_info since optimizer is already built? I
+                    //think this is correct but it's been awhile since I looked at this code.
                     def.add_input_info(
                         "error".to_string(),
                         TensorInfo::new(
@@ -669,6 +814,7 @@ impl <'a>Brain <'a>{
                 // get the file "checkpoint_data" from inside directory and read the first line
                 let target = dir.clone()+r"\checkpoint_data.json";
                 // same as above but with from_reader
+                println!("{}", target);
                 let deserialized_network: SerializedNetwork = serde_json::from_reader(fs::File::open(target.clone()).unwrap()).unwrap();
                 // store the checkpoint data in the hashmap with directory as key
                 (dir.to_string(), deserialized_network)
@@ -829,26 +975,43 @@ impl SerializedNetwork{
 }
 
 //TODO: add assertions for more than just runtime error.
+
 #[cfg(test)]
 mod tests {
+    use crate::*;
+    //TODO: these need a better constructor at the brain level, fix after layer is refactored
     #[test]
-    fn test_net() {
-        log::debug!("test_net");
-        //call the main function
-        use crate::*;
+    fn test_builder(){
+        //first, we create the network as a Vector of Layers
+        //TODO: internal builder with method chaining instead of vec of Layers
+        //TODO: can build a call stack with vec push fn's then call 
+        //      sequentially with build for lazy builder. 
+        //      Since each argument is len 1 use a tuple Vec<(fn, arg)>
+        //      use fn -> arg repetition pattern in builder trait. 
+        //      a lazy builder on a lazy builder.
+        //let network = std().width(10).activation(activations::tanh(100)).std().width(10).activation(activations::tanh(100));
+        //TODO: extract this routine into builder
+        let network = vec![
+            layers::std_layer::new(2, activations::Tanh(100)),
+            layers::std_layer::new(10000, activations::Tanh(100)),
+            layers::std_layer::new(10000, activations::Tanh(100)),
+            layers::std_layer::new(10000, activations::Tanh(100)),
+            layers::std_layer::new(1, activations::Sigmoid(100)),
+        ];
 
-        //CONSTRUCTION//
-        let mut norm_net = Brain::new("test_net",2, 1, 10, 10, layers::norm(), activations::tanh(10), 1.0, 5 as f32).unwrap();
+        //let mut second_std = std_layer::init();
+        //let second_std = second_std.width(10).activation(Some(activations::Tanh{max_integer: 100}.Activation()));
+        //let second_layer = Box::new(second_std);
+        //network.push(initial_layer);
+        //network.push(second_layer);
+        //TODO: end of extraction routine
 
-        //FITNESS FUNCTION//
-        //TODO: auto gen labels from outputs and fitness function.
-
-        //TRAIN//
+        let mut Net = Brain::new("test", network, 32.0, 10.0).unwrap();
         let mut rrng = rand::thread_rng();
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
         // create 100 entries for inputs and outputs of xor
-        for _ in 0..1000 {
+        for _ in 0..1000000 {
             // instead of the above, generate either 0 or 1 and cast to f32
             let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
             let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
@@ -857,138 +1020,189 @@ mod tests {
             outputs.push(output);
         }
 
-        norm_net.train(inputs, outputs).unwrap();
+        Net.train(inputs, outputs).unwrap();
+        //TODO: restore unittests
+        //.build();
+        
+        
+        print!("configured std_layer");
+        return
     }
-
-    #[test]
-    fn test_serialization() {
-        //TODO: failing after checkpoint features
-        log::debug!("test_serialization");
-        //call the main function
-        use crate::*;
-
-        //CONSTRUCTION//
-        let mut norm_net = Brain::new("test_serialization",2, 1, 20, 15, layers::norm(), activations::tanh(10), 0.01, 5 as f32).unwrap();
-        //TRAIN//
-        let mut rrng = rand::thread_rng();
-        let mut inputs = Vec::new();
-        let mut outputs = Vec::new();
-        // create 100 entries for inputs and outputs of xor
-        for _ in 0..10 {
-            // instead of the above, generate either 0 or 1 and cast to f32
-            let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
-            let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
-
-            inputs.push(input);
-            outputs.push(output);
-        }
-
-        norm_net.train(inputs.clone(), outputs.clone()).unwrap();
-
-        // save the network
-        norm_net
-            .save()
-            .unwrap();
-
-        //load the network
-        let mut path = "".to_string();
-        //NOTE: dont ever call a string something else in your crates or someone I know will find you.
-        let _ = std::path::PathBuf::new();
-        for entry in fs::read_dir("test_serialization/").unwrap() {
-            let entry = entry.unwrap();
-            let is_dir = entry.path();
-            if !is_dir.is_dir() {
-                continue;
-            } else {
-                path = is_dir.clone().to_str().unwrap().to_string();
-            }
-            log::debug!("{:?}", path);
-        }
-        let path = path.to_string();
-        log::debug!("{:?}", path);
-
-        norm_net.load(path.to_string()).unwrap();
-
-        norm_net.train(inputs, outputs).unwrap();
-    }
-
-    #[test]
-    fn test_checkpoint(){
-        log::debug!("test_checkpoint");
-        use crate::*;
-        //CONSTRUCTION//
-        let mut norm_net = Brain::new("test_checkpoint",2, 1, 200, 96, layers::norm(), activations::tanh(10), 10.0, 5 as f32).unwrap();
-        //TRAIN//
-        let mut rrng = rand::thread_rng();
-        // create entries for inputs and outputs of xor
-        //TODO: window size and trag_iterations is hyperparameter for arch search. they should exist in shared struct or function parameter 
-        //TODO: how can we train this in RL? need to store window and selection_pressure in class state
-        //TODO: this needs to happen on initialization
-        for _ in 0..15{
-            let mut inputs = Vec::new();
-            let mut outputs = Vec::new();
-            for _ in 0..10 {
-                // instead of the above, generate either 0 or 1 and cast to f32
-                let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
-                let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
-
-                inputs.push(input);
-                outputs.push(output);
-            }
-            // TEST TRAIN
-            norm_net.train_checkpoint_search(inputs.clone(), outputs.clone(),  2).unwrap();
-
-            // TEST LOAD
-            norm_net.load_checkpoint_search(0.001).unwrap();
-        }
-    }
-    #[test]
-    fn test_infer(){
-        log::debug!("test_inference");
-        use crate::*;
-        //CONSTRUCTION//
-        let mut norm_net = Brain::new("test_inference",2, 1, 200, 96, layers::norm(), activations::tanh(10), 10.0, 5 as f32).unwrap();
-        //TRAIN//
-        let mut rrng = rand::thread_rng();
-        // create entries for inputs and outputs of xor
-        for _ in 0..10{
-            let mut inputs:Tensor<f32> = Tensor::new(&[1u64, 2 as u64]);
-            let res: Tensor<f32>= norm_net.infer(inputs).unwrap();
-        }
-    }
-    #[test]
-    fn test_evaluate(){
-        log::debug!("test_evaluate");
-        use crate::*;
-        //CONSTRUCTION//
-        let mut norm_net = Brain::new("test_evaluate",2, 1, 200, 96, layers::norm(), activations::tanh(10), 1.0, 10 as f32).unwrap();
-        //TRAIN//
-        let mut rrng = rand::thread_rng();
-
-        //TODO: this doesnt make much sense since we arent implementing state-action-reward tables 
-        let fitness_function = Box::new(|outputs: &Tensor<f32>| -> Tensor<f32> {
-            //TODO: which scalars in the output vector do we want to maximize? a good default fitness function 
-            //      is a scalar constant to each entry in the vector or power term.
-            //pass a function with a derivative that goes to zero or 1?
-            let mut res_tensor = Tensor::new(outputs.dims());
-            res_tensor[0] = outputs[0]/outputs[0];
-            res_tensor
-        });
-        // create entries for inputs and outputs of xor
-        for _ in 0..30{
-            // same as above but push a vec with two random floats
-            let inputs = vec![(rrng.gen::<f32>()), (rrng.gen::<f32>())];
-            let res: Tensor<f32> =  norm_net.evaluate(inputs, 1, fitness_function.clone()).unwrap();
-        }
-
-        //SEARCH RECOVERED MODEL:
-        norm_net.load_checkpoint_search(0.001).unwrap();
-        for _ in 0..10{
-            let inputs = vec![(rrng.gen::<f32>()), (rrng.gen::<f32>())];
-            let res: Tensor<f32> =  norm_net.evaluate(inputs, 1, fitness_function.clone()).unwrap();
-        }
-    }
-    //TODO: test layer modularity
-    // #[test]
-    // fn test_architectures(){}
 }
+//TODO: restore the below unittests with builder once the above test passes
+//    fn test_net() {
+//        log::debug!("test_net");
+//        //call the main function
+//        use crate::*;
+//
+//        //CONSTRUCTION//
+//        let mut hidden_layer = std_layer().input_size(10).output_size(10).activation(tanh(10));
+//        let layers = vec![
+//            //TODO: prefer a function constructor like Keras and just size of this layer, also stateful
+//            //      builder should track prev and next sizes
+//            //e.g.:
+//            //let mynet = Brain().std_layer(5, relu).std_layer(10, relu).std_layer(5, relu),
+//            hidden_layer,
+//            hidden_layer,
+//            hidden_layer,
+//            //std_layer().input_size(10).output_size(10).activation(relu(10)),
+//            //std_layer().input_size(10).output_size(10).activation(relu(10)),
+//            //std_layer().input_size(10).output_size(10).activation(relu(10)),
+//            //std_layer().input_size(10).output_size(10).activation(relu(10)),
+//        ];
+//        //let mut norm_net = Brain::new("test_net",2, 1, 10, 10, layers::std_layer(), activations::tanh(10), 1.0, 5 as f32).unwrap();
+//        let mut norm_net = Brain::new("test_net", layers, 1.0, 5 as f32).unwrap();
+//
+//        //FITNESS FUNCTION//
+//        //TODO: auto gen labels from outputs and fitness function.
+//
+//        //TRAIN//
+//        let mut rrng = rand::thread_rng();
+//        let mut inputs = Vec::new();
+//        let mut outputs = Vec::new();
+//        // create 100 entries for inputs and outputs of xor
+//        for _ in 0..1000 {
+//            // instead of the above, generate either 0 or 1 and cast to f32
+//            let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
+//            let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
+//
+//            inputs.push(input);
+//            outputs.push(output);
+//        }
+//
+//        norm_net.train(inputs, outputs).unwrap();
+//    }
+//
+//    #[test]
+//    fn test_serialization() {
+//        //TODO: failing after checkpoint features
+//        log::debug!("test_serialization");
+//        //call the main function
+//        use crate::*;
+//
+//        //CONSTRUCTION//
+//        let mut norm_net = Brain::new("test_serialization",2, 1, 20, 15, layers::std_layer(), activations::tanh(10), 0.01, 5 as f32).unwrap();
+//        //TRAIN//
+//        let mut rrng = rand::thread_rng();
+//        let mut inputs = Vec::new();
+//        let mut outputs = Vec::new();
+//        // create 100 entries for inputs and outputs of xor
+//        for _ in 0..10 {
+//            // instead of the above, generate either 0 or 1 and cast to f32
+//            let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
+//            let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
+//
+//            inputs.push(input);
+//            outputs.push(output);
+//        }
+//
+//        norm_net.train(inputs.clone(), outputs.clone()).unwrap();
+//
+//        // save the network
+//        norm_net
+//            .save()
+//            .unwrap();
+//
+//        //load the network
+//        let mut path = "".to_string();
+//        //NOTE: dont ever call a string something else in your crates or someone I know will find you.
+//        let _ = std::path::PathBuf::new();
+//        for entry in fs::read_dir("test_serialization/").unwrap() {
+//            let entry = entry.unwrap();
+//            let is_dir = entry.path();
+//            if !is_dir.is_dir() {
+//                continue;
+//            } else {
+//                path = is_dir.clone().to_str().unwrap().to_string();
+//            }
+//            log::debug!("{:?}", path);
+//        }
+//        let path = path.to_string();
+//        log::debug!("{:?}", path);
+//
+//        norm_net.load(path.to_string()).unwrap();
+//
+//        norm_net.train(inputs, outputs).unwrap();
+//    }
+//
+//    #[test]
+//    fn test_checkpoint(){
+//        log::debug!("test_checkpoint");
+//        use crate::*;
+//        //CONSTRUCTION//
+//        let mut norm_net = Brain::new("test_checkpoint",2, 1, 200, 96, layers::std_layer(), activations::tanh(10), 10.0, 5 as f32).unwrap();
+//        //TRAIN//
+//        let mut rrng = rand::thread_rng();
+//        // create entries for inputs and outputs of xor
+//        //TODO: window size and trag_iterations is hyperparameter for arch search. they should exist in shared struct or function parameter 
+//        //TODO: how can we train this in RL? need to store window and selection_pressure in class state
+//        //TODO: this needs to happen on initialization
+//        for _ in 0..15{
+//            let mut inputs = Vec::new();
+//            let mut outputs = Vec::new();
+//            for _ in 0..10 {
+//                // instead of the above, generate either 0 or 1 and cast to f32
+//                let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
+//                let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
+//
+//                inputs.push(input);
+//                outputs.push(output);
+//            }
+//            // TEST TRAIN
+//            norm_net.train_checkpoint_search(inputs.clone(), outputs.clone(),  2).unwrap();
+//
+//            // TEST LOAD
+//            norm_net.load_checkpoint_search(0.001).unwrap();
+//        }
+//    }
+//    #[test]
+//    fn test_infer(){
+//        log::debug!("test_inference");
+//        use crate::*;
+//        //CONSTRUCTION//
+//        let mut norm_net = Brain::new("test_inference",2, 1, 200, 96, layers::std_layer(), activations::tanh(10), 10.0, 5 as f32).unwrap();
+//        //TRAIN//
+//        let mut rrng = rand::thread_rng();
+//        // create entries for inputs and outputs of xor
+//        for _ in 0..10{
+//            let mut inputs:Tensor<f32> = Tensor::new(&[1u64, 2 as u64]);
+//            let res: Tensor<f32>= norm_net.infer(inputs).unwrap();
+//        }
+//    }
+//    #[test]
+//    fn test_evaluate(){
+//        log::debug!("test_evaluate");
+//        use crate::*;
+//        //CONSTRUCTION//
+//        let layers = vec![layers::std_layer(), layers::std_layer()];
+//        let mut norm_net = Brain::new("test_evaluate",2, 1, 200, 96, layers::std_layer(), activations::tanh(10), 1.0, 10 as f32).unwrap();
+//        //TRAIN//
+//        let mut rrng = rand::thread_rng();
+//
+//        //TODO: this doesnt make much sense since we arent implementing state-action-reward tables 
+//        let fitness_function = Box::new(|outputs: &Tensor<f32>| -> Tensor<f32> {
+//            //TODO: which scalars in the output vector do we want to maximize? a good default fitness function 
+//            //      is a scalar constant to each entry in the vector or power term.
+//            //pass a function with a derivative that goes to zero or 1?
+//            let mut res_tensor = Tensor::new(outputs.dims());
+//            res_tensor[0] = outputs[0]/outputs[0];
+//            res_tensor
+//        });
+//        // create entries for inputs and outputs of xor
+//        for _ in 0..30{
+//            // same as above but push a vec with two random floats
+//            let inputs = vec![(rrng.gen::<f32>()), (rrng.gen::<f32>())];
+//            let res: Tensor<f32> =  norm_net.evaluate(inputs, 1, fitness_function.clone()).unwrap();
+//        }
+//
+//        //SEARCH RECOVERED MODEL:
+//        norm_net.load_checkpoint_search(0.001).unwrap();
+//        for _ in 0..10{
+//            let inputs = vec![(rrng.gen::<f32>()), (rrng.gen::<f32>())];
+//            let res: Tensor<f32> =  norm_net.evaluate(inputs, 1, fitness_function.clone()).unwrap();
+//        }
+//    }
+//    //TODO: test layer modularity
+//    // #[test]
+//    // fn test_architectures(){}
+//}
