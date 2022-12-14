@@ -4,7 +4,6 @@
 //this includes but is not limited to: convolution, residual connections (how the network layers are connected),
 //bias operations, recurrent connections, variant and invariant scaling, etc. if it isnt an activation function
 //it should be defined here.
-use extension_trait;
 use half::f16;
 use tensorflow::ops;
 use tensorflow::ops::TensorArrayV3;
@@ -97,10 +96,12 @@ pub trait ConfigurableLayer {
     fn _width(&mut self, width: u64);
     fn _activation(&mut self, activation: Option<Activation>);
 }
+
+//TODO: @DEPRECATED
 ///ConfigurableLayer that can be method chained. Used by application developer.
 pub trait ConfigurableLayerChain {
     //TODO: if this is &mut does that fix the Size clone issue in BuilderLayer?
-    //pass through the builder for LayerConfiguration
+    //pass through the builder for LayerState
     fn input(&mut self, input: Operation) -> &mut Self;
     fn input_size(&mut self, input_size: u64) -> &mut Self;
     fn output_size(&mut self, output_size: u64) -> &mut Self;
@@ -146,7 +147,7 @@ pub trait ConfigureLayer {
 }
 impl<T> ConfigureLayer for T
 where
-    T: ConfigurableLayer + InitializeLayer,
+    T: ConfigurableLayer,
 {
     fn config(mut self, width: u64, activation: Activation) -> T {
         //self.width(width).activation(Some(activation))
@@ -155,12 +156,12 @@ where
         self
     }
 }
-pub trait new_layer {
+pub trait build_layer {
     fn new(width: u64, activation: Activation) -> Self
     where
         Self: Sized;
 }
-impl<T> new_layer for T
+impl<T> build_layer for T
 where
     T: ConfigurableLayer + InitializeLayer,
 {
@@ -171,9 +172,9 @@ where
 
 //FUNDAMENTAL LAYER STATE//
 ///A subset of concrete state standardized to define any layer in tf.
-pub struct LayerConfiguration {
+pub struct LayerState {
     input: Option<Operation>, //this trait bound is named O1 in tensorflow-rust
-    //internal vector sizes
+    //input output vector sizes
     input_size: u64,
     output_size: u64,
     //external configuration for vector sizes
@@ -181,21 +182,9 @@ pub struct LayerConfiguration {
     //TODO: remove dyn here
     activation: Option<Activation>,
 }
-//impl Clone for LayerConfiguration {
-//    fn clone(&self) -> Self {
-//        LayerConfiguration {
-//            input: self.input.clone(),
-//            input_size: self.input_size,
-//            output_size: self.output_size,
-//            width: self.width,
-//            activation: self.activation,
-//        }
-//    }
-//}
-//Type alias blanket implementation
-impl InitializeLayer for LayerConfiguration {
+impl InitializeLayer for LayerState {
     fn init() -> Self {
-        LayerConfiguration {
+        LayerState {
             input: None,
             input_size: 0,
             output_size: 0,
@@ -204,7 +193,7 @@ impl InitializeLayer for LayerConfiguration {
         }
     }
 }
-impl ConfigurableLayer for LayerConfiguration {
+impl ConfigurableLayer for LayerState {
     fn _input(&mut self, input: Operation) {
         self.input = Some(input);
     }
@@ -231,12 +220,8 @@ pub struct TrainnableLayer {
 //NETWORK TRAITS//
 //Example:
 //let network:Vec<TrainnableLayer> = std_layer().len(10).activation(relu).next(std_layer).len(10).activation(relu).build()?;
-//TODO: automatically configure the input and output vector, also each input_width is automatically
-
-//TODO: relax the trait reqs on BuildableLayer which is the fundamental trait
-//      for feature access to the sequential builder framework
-
 ///The traits required to build a network from a layer as a trait alias
+//@DEPRECATED
 pub trait BuildableLayer: BuildLayer + LayerAccessor + ConfigurableLayer {} //+ InitializeLayer {}
 impl<T> BuildableLayer for T where T: BuildLayer + LayerAccessor + ConfigurableLayer {} //+ InitializeLayer {}
 impl<T> BuildLayer for &mut T
@@ -290,7 +275,7 @@ where
 //TODO: fix Chaining blanket implementations and the framework is in alpha!
 //TODO: we should just be working with and initializing a Vector
 //TODO: get rid of next_layer call for now just write a method for
-//      LayerConfiguration since all layers are a type alias, later
+//      LayerState since all layers are a type alias, later
 //      this can be with a trait object for non alias'
 //TODO: cleanup these traits via simplification and standardization
 //configured by the previous width value
@@ -389,10 +374,10 @@ pub trait BuildNetwork {
 //LAYER DEFINITIONS//
 //TODO: style lints so function initializer and struct type are distinct, also need to follow Rust
 //      linting
-//pub type std_layer = LayerConfiguration;
+//pub type std_layer = LayerState;
 //TODO: just make this a struct with one entry, the procedural macro
 //      will still apply
-pub struct std_layer(LayerConfiguration);
+pub struct std_layer(LayerState);
 //TODO: how can input: Operation be method chained? solve in a builder
 impl ConfigurableLayer for std_layer {
     fn _input(&mut self, input: Operation) {
@@ -496,7 +481,7 @@ impl BuildLayer for std_layer {
 
 impl InitializeLayer for std_layer {
     fn init() -> Self {
-        std_layer(LayerConfiguration {
+        std_layer(LayerState {
             input: None,
             input_size: 0,
             output_size: 0,
@@ -558,7 +543,7 @@ impl InitializeLayer for std_layer {
 /// Otherwise decimal precision of float type is our parameter type precision.
 pub struct norm_layer {
     //TODO: accessor methods for this so std_layer.* is how configuration is set and ultimately evaluated
-    conf: LayerConfiguration,
+    conf: LayerState,
     order: u64, //the effective precision of the network
     weights: Option<Variable>,
     //TODO: this should be encapsulated in the currently deprecated mod
