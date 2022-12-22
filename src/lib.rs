@@ -95,6 +95,7 @@ pub struct BrainBuilder<Layer: BuildLayer + LayerAccessor + ConfigurableLayer> {
     learning_rate: f32,
     error_power: f32,
 }
+//TODO: This causes a temporary value dropped while building
 ///Constructor to initialize the BrainBuilder
 pub fn Brain<Layer>() -> BrainBuilder<Layer>
 where
@@ -113,27 +114,27 @@ impl<Layer> BrainBuilder<Layer>
 where
     Layer: BuildLayer + LayerAccessor + ConfigurableLayer,
 {
-    pub fn add_layer(&mut self, layer: Layer) -> &mut Self {
+    pub fn add_layer(mut self, layer: Layer) -> Self {
         self.layers.push(layer);
         self
     }
-    pub fn name(&mut self, name: String) -> &mut Self {
+    pub fn name(mut self, name: String) -> Self {
         self.name = name;
         self
     }
-    pub fn num_inputs(&mut self, num_inputs: u64) -> &mut Self {
+    pub fn num_inputs(mut self, num_inputs: u64) -> Self {
         self.num_inputs = num_inputs;
         self
     }
-    pub fn learning_rate(&mut self, learning_rate: f32) -> &mut Self {
+    pub fn learning_rate(mut self, learning_rate: f32) -> Self {
         self.learning_rate = learning_rate;
         self
     }
-    pub fn error_power(&mut self, error_power: f32) -> &mut Self {
+    pub fn error_power(mut self, error_power: f32) -> Self {
         self.error_power = error_power;
         self
     }
-    pub fn build(&mut self) -> Result<Brain, Status> {
+    pub fn build(mut self) -> Result<Brain, Status> {
         //TODO: ~Just Rust Things~
         let mut layers = Vec::new();
         for i in 0..self.layers.len() {
@@ -142,7 +143,7 @@ where
 
         //move self.layers to a local variable named layers since self.layers isnt clone
         Brain::new(
-            self.name.as_str(),
+            self.name,
             layers,
             self.num_inputs,
             self.learning_rate,
@@ -151,8 +152,7 @@ where
     }
 }
 
-//TODO: defaults such as learning rate (use stateful builder for this)
-pub struct Brain<'a> {
+pub struct Brain {
     /// Tensorflow objects for user abstraction from Tensorflow
     scope: Scope,
     session: Session,
@@ -173,15 +173,15 @@ pub struct Brain<'a> {
     ///class for serializing, saving and loading the model
     SavedModelSaver: RefCell<Option<SavedModelSaver>>,
     ///user specified name of this model
-    name: &'a str,
+    name: String,
     ///the error power for scaling the error gradient's pressure on the weights
     error_power: f32,
 }
-impl<'a> Brain<'a> {
+impl Brain {
     //TODO: type safety: use trait bounds to allow for using bigints etc for counting//indexing
     //      types.
     pub fn new<Layer: BuildLayer + LayerAccessor + ConfigurableLayer>(
-        name: &'a str,
+        name: String,
         //TODO: a vec of layers here will suffice for now, but this will be a builder pattern as
         //soon as possible
         layers: Vec<Layer>,
@@ -189,7 +189,7 @@ impl<'a> Brain<'a> {
         //activation: Activation,
         learning_rate: f32,
         error_power: f32,
-    ) -> Result<Brain<'a>, Status> {
+    ) -> Result<Brain, Status> {
         let mut scope = Scope::new_root_scope();
 
         let mut input_size = num_inputs;
@@ -314,7 +314,7 @@ impl<'a> Brain<'a> {
 
     ///save all Brain state
     fn serialize_network(&self, dir: String) -> Result<(), Box<dyn Error>> {
-        let name = self.name;
+        let name = self.name.clone();
         // create a serialized_network object
         let serialized_network = SerializedNetwork {
             parent_search_name: name.to_string(),
@@ -623,7 +623,7 @@ mod tests {
     use crate::*;
     //TODO: these need a better constructor at the brain level, fix after layer is refactored
     #[test]
-    fn test_builder() {
+    fn test_initial() {
         //first, we create the network as a Vector of Layers
         //TODO: internal builder with method chaining instead of vec of Layers
         //TODO: can build a call stack with vec push fn's then call
@@ -640,15 +640,15 @@ mod tests {
             layers::std_layer::new(1, activations::Sigmoid(100)),
         ];
 
-        let mut Net = Brain::new("test-net", network, 2, 32.0, 10.0).unwrap();
-        //TODO: Brain().inputs(2).layer(layers::std_layer::new(1000, activations::Tanh(10))).layer(layers::std_layer::new(1, activations::Tanh(10))).build();
-        //TODO: also expose optional configuration such as Brain().inputs(2).dtype(bf16).layers::std_layer::new(1000, activations::Tanh(10)).build();
+        let mut Net = Brain::new("test-net".to_string(), network, 2, 32.0, 10.0).unwrap();
+
+        //train the network
         let mut rrng = rand::thread_rng();
         // create 100 entries for inputs and outputs of xor
         for _ in 0..100 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
-            for _ in 0..1000 {
+            for _ in 0..100 {
                 // instead of the above, generate either 0 or 1 and cast to f32
                 let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
                 let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
@@ -660,8 +660,43 @@ mod tests {
         }
         //save the model
         Net.save("test-initial").unwrap();
-        //TODO: restore unittests
-        //.build();
+
+        return;
+    }
+    //TODO:
+    #[test]
+    fn test_builder() {
+        //TODO: Brain().inputs(2).layer(layers::std_layer::new(1000, activations::Tanh(10))).layer(layers::std_layer::new(1, activations::Tanh(10))).build();
+        //TODO: also expose optional configuration such as Brain().inputs(2).dtype(bf16).layers::std_layer::new(1000, activations::Tanh(10)).build();
+
+        //let mut Net = Brain::new("test-net", network, 2, 32.0, 10.0).unwrap();
+        let mut Net = Brain();
+        let mut Net = Net
+            .num_inputs(2)
+            .add_layer(layers::std_layer::new(100, activations::Tanh(10)))
+            .add_layer(layers::std_layer::new(100, activations::Tanh(10)))
+            .add_layer(layers::std_layer::new(1, activations::Sigmoid(100)))
+            .build()
+            .unwrap();
+
+        //train the network
+        let mut rrng = rand::thread_rng();
+        // create 100 entries for inputs and outputs of xor
+        for _ in 0..100 {
+            let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
+            for _ in 0..100 {
+                // instead of the above, generate either 0 or 1 and cast to f32
+                let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
+                let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
+                inputs.push(input);
+                outputs.push(output);
+            }
+            Net.train(inputs, outputs).unwrap();
+            println!("trained a batch");
+        }
+        //save the model
+        Net.save("test-builder").unwrap();
 
         return;
     }
