@@ -203,7 +203,7 @@ impl Brain {
             .build(&mut scope.with_op_name("input"))?;
         let Label = ops::Placeholder::new()
             .dtype(DataType::Float)
-            .shape([1u64, layers[layers.len() - 1].get_width()])
+            .shape([1u64, *layers[layers.len() - 1].get_width()])
             .build(&mut scope.with_op_name("label"))?;
 
         //CONSTRUCT NETWORK
@@ -225,11 +225,12 @@ impl Brain {
             //TODO: need to setup the Input hook in the builder.
             //layer.get_input()?(layer_input_iter.clone().into());
 
-            layer.input(layer_input_iter.clone());
-            layer.input_size(input_size);
-            input_size = layer.get_width();
-            output_size = layer.get_width();
-            layer.output_size(output_size);
+            layer = layer.input(layer_input_iter.clone());
+            layer = layer.input_size(input_size);
+            //TODO: refactor this
+            input_size = *layer.get_width();
+            output_size = &input_size;
+            layer = layer.output_size(*output_size);
             //TODO: end of extraction routine
 
             let parameters = layer.build_layer(&mut scope)?;

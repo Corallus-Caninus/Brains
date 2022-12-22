@@ -51,27 +51,6 @@ use crate::activations::*;
 //TODO: Tensorflow operations should be copy they are just pointers we cant do anything about the underlying data clone also should get optimized anyways so its just boilerplate. If anything put a guard on it and make it send/sync as well.
 
 //LAYER TRAITS//
-//TODO: @DEPRECATED
-///A layer defines the node operations for each layer in the neural network.
-//pub type Layer = Box<
-//    dyn Fn(
-//        //input to this network; really need to consolidate
-//        //tensorflow Graph API in/out as
-//        //edge trait
-//        Output,
-//        u64, //input size,
-//        u64, //output size,
-//        //TODO: this should also be not a
-//        //function
-//        &dyn Fn(Output, &mut Scope) -> Result<Operation, Status>, //activation function,
-//        &mut Scope,                                               //tf scope
-//    ) -> Result<(Vec<Variable>, Output, Operation), Status>,
-//>;
-//TODO: a compile time Function type is possible but this may be better implemented in the builder
-//     functional objects and functors are interesting but this needs to be restructured
-//A builder so architectures can organize when things are build (e.g. wait to set layer size for
-//programmatic architecture search).
-
 ///Builds a tensorflow layer from an arbitrary type and a graph scope.
 ///Anything that successfully implements this can be used as a layer in a Brain.
 pub trait BuildLayer {
@@ -79,11 +58,11 @@ pub trait BuildLayer {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status>;
 }
 pub trait LayerAccessor {
-    fn get_input(&self) -> Option<Operation>;
+    fn get_input(&self) -> &Option<Operation>;
     //Copy return types can be pass by reference
-    fn get_input_size(&self) -> u64;
-    fn get_output_size(&self) -> u64;
-    fn get_width(&self) -> u64;
+    fn get_input_size(&self) -> &u64;
+    fn get_output_size(&self) -> &u64;
+    fn get_width(&self) -> &u64;
     //TODO: technically we need get_activation to complete the pattern
     //fn get_activation(self) -> Option<Box<dyn Activation>>;
 }
@@ -91,11 +70,11 @@ pub trait LayerAccessor {
 ///A trait that defines the standard layer parameters via getters
 ///and setters that can mutably configure layers, used by internal network builder.
 pub trait ConfigurableLayer {
-    fn input(&mut self, input: Operation);
-    fn input_size(&mut self, input_size: u64);
-    fn output_size(&mut self, output_size: u64);
-    fn width(&mut self, width: u64);
-    fn activation(&mut self, activation: Option<Activation>);
+    fn input(self, input: Operation) -> Self;
+    fn input_size(self, input_size: u64) -> Self;
+    fn output_size(self, output_size: u64) -> Self;
+    fn width(self, width: u64) -> Self;
+    fn activation(self, activation: Option<Activation>) -> Self;
 }
 
 ///Layer constructor trait with default values.
@@ -113,10 +92,7 @@ where
     T: ConfigurableLayer,
 {
     fn config(mut self, width: u64, activation: Activation) -> T {
-        //self.width(width).activation(Some(activation))
-        self.width(width);
-        self.activation(Some(activation));
-        self
+        self.width(width).activation(Some(activation))
     }
 }
 pub trait build_layer {
@@ -157,20 +133,25 @@ impl InitializeLayer for LayerState {
     }
 }
 impl ConfigurableLayer for LayerState {
-    fn input(&mut self, input: Operation) {
+    fn input(mut self, input: Operation) -> Self {
         self.input = Some(input);
+        self
     }
-    fn input_size(&mut self, input_size: u64) {
+    fn input_size(mut self, input_size: u64) -> Self {
         self.input_size = input_size;
+        self
     }
-    fn output_size(&mut self, output_size: u64) {
+    fn output_size(mut self, output_size: u64) -> Self {
         self.output_size = output_size;
+        self
     }
-    fn width(&mut self, width: u64) {
+    fn width(mut self, width: u64) -> Self {
         self.width = width;
+        self
     }
-    fn activation(&mut self, activation: Option<Activation>) {
+    fn activation(mut self, activation: Option<Activation>) -> Self {
         self.activation = activation;
+        self
     }
 }
 ///A layer that has been added to a graph with its Output and backing
@@ -181,53 +162,70 @@ pub struct TrainnableLayer {
     pub operation: Operation,
 }
 
-pub trait LayerChain<F, T> {
-    fn next_layers(self, layer: F) -> Self
-    where
-        F: FnOnce() -> Vec<Box<T>>,
-        T: Clone;
-}
-
 pub trait BuildNetwork {
     fn build(self, Scope: &mut Scope) -> Result<Vec<TrainnableLayer>, Status>;
 }
+//TODO: this should be a derive macro for any T | T.0 = LayerState
+pub trait InheritState {
+    fn get_mut_layer_state(&mut self) -> &mut LayerState;
+    fn get_layer_state(&self) -> &LayerState;
+}
+impl<L> ConfigurableLayer for L
+where
+    L: InheritState,
+{
+    fn input(mut self, input: Operation) -> Self {
+        self.get_mut_layer_state().input = Some(input);
+        self
+    }
+    fn input_size(mut self, input_size: u64) -> Self {
+        self.get_mut_layer_state().input_size = input_size;
+        self
+    }
+    fn output_size(mut self, output_size: u64) -> Self {
+        self.get_mut_layer_state().output_size = output_size;
+        self
+    }
+    fn width(mut self, width: u64) -> Self {
+        self.get_mut_layer_state().width = width;
+        self
+    }
+    fn activation(mut self, activation: Option<Activation>) -> Self {
+        self.get_mut_layer_state().activation = activation;
+        self
+    }
+}
+impl<L> LayerAccessor for L
+where
+    L: InheritState,
+{
+    fn get_input(&self) -> &Option<Operation> {
+        &self.get_layer_state().input
+    }
+    fn get_input_size(&self) -> &u64 {
+        &self.get_layer_state().input_size
+    }
+    fn get_output_size(&self) -> &u64 {
+        &self.get_layer_state().output_size
+    }
+    fn get_width(&self) -> &u64 {
+        &self.get_layer_state().width
+    }
+}
 
 //LAYER DEFINITIONS//
-//each layer must inherite LayerState and derive ConfigurableLayer, LayerAccessor,
+//each layer must derive InheritState accessor trait,
 //BuildLayer and InitializeLayer
 //
 //BuildLayer is the trait that defines the layers architecture, the rest are setters, getters and
 //defaults.
 pub struct std_layer(LayerState);
-impl ConfigurableLayer for std_layer {
-    fn input(&mut self, input: Operation) {
-        self.0.input = Some(input);
+impl InheritState for std_layer {
+    fn get_mut_layer_state(&mut self) -> &mut LayerState {
+        &mut self.0
     }
-    fn input_size(&mut self, input_size: u64) {
-        self.0.input_size = input_size;
-    }
-    fn output_size(&mut self, output_size: u64) {
-        self.0.output_size = output_size;
-    }
-    fn width(&mut self, width: u64) {
-        self.0.width = width;
-    }
-    fn activation(&mut self, activation: Option<Activation>) {
-        self.0.activation = activation;
-    }
-}
-impl LayerAccessor for std_layer {
-    fn get_input(&self) -> Option<Operation> {
-        self.0.input.clone()
-    }
-    fn get_input_size(&self) -> u64 {
-        self.0.input_size
-    }
-    fn get_output_size(&self) -> u64 {
-        self.0.output_size
-    }
-    fn get_width(&self) -> u64 {
-        self.0.width
+    fn get_layer_state(&self) -> &LayerState {
+        &self.0
     }
 }
 impl BuildLayer for std_layer {
