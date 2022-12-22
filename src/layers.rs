@@ -87,54 +87,17 @@ pub trait LayerAccessor {
     //TODO: technically we need get_activation to complete the pattern
     //fn get_activation(self) -> Option<Box<dyn Activation>>;
 }
+//TODO: get rid of  since or reimplement method chaining
 ///A trait that defines the standard layer parameters via getters
 ///and setters that can mutably configure layers, used by internal network builder.
 pub trait ConfigurableLayer {
-    fn _input(&mut self, input: Operation);
-    fn _input_size(&mut self, input_size: u64);
-    fn _output_size(&mut self, output_size: u64);
-    fn _width(&mut self, width: u64);
-    fn _activation(&mut self, activation: Option<Activation>);
+    fn input(&mut self, input: Operation);
+    fn input_size(&mut self, input_size: u64);
+    fn output_size(&mut self, output_size: u64);
+    fn width(&mut self, width: u64);
+    fn activation(&mut self, activation: Option<Activation>);
 }
 
-//TODO: @DEPRECATED
-///ConfigurableLayer that can be method chained. Used by application developer.
-pub trait ConfigurableLayerChain {
-    //TODO: if this is &mut does that fix the Size clone issue in BuilderLayer?
-    //pass through the builder for LayerState
-    fn input(&mut self, input: Operation) -> &mut Self;
-    fn input_size(&mut self, input_size: u64) -> &mut Self;
-    fn output_size(&mut self, output_size: u64) -> &mut Self;
-    fn width(&mut self, width: u64) -> &mut Self;
-    fn activation(&mut self, activation: Option<Activation>) -> &mut Self;
-}
-///Cobija
-impl<T> ConfigurableLayerChain for T
-where
-    T: ?Sized + ConfigurableLayer,
-{
-    fn input(&mut self, input: Operation) -> &mut Self {
-        self._input(input);
-        self
-    }
-    fn input_size(&mut self, input_size: u64) -> &mut Self {
-        self._input_size(input_size);
-        self
-    }
-    fn output_size(&mut self, output_size: u64) -> &mut Self {
-        self._output_size(output_size);
-        self
-    }
-    fn width(&mut self, width: u64) -> &mut Self {
-        self._width(width);
-        self
-    }
-    fn activation(&mut self, activation: Option<Activation>) -> &mut Self {
-        self._activation(activation);
-        self
-    }
-}
-//TODO: implement
 ///Layer constructor trait with default values.
 pub trait InitializeLayer {
     fn init() -> Self
@@ -151,8 +114,8 @@ where
 {
     fn config(mut self, width: u64, activation: Activation) -> T {
         //self.width(width).activation(Some(activation))
-        self._width(width);
-        self._activation(Some(activation));
+        self.width(width);
+        self.activation(Some(activation));
         self
     }
 }
@@ -194,19 +157,19 @@ impl InitializeLayer for LayerState {
     }
 }
 impl ConfigurableLayer for LayerState {
-    fn _input(&mut self, input: Operation) {
+    fn input(&mut self, input: Operation) {
         self.input = Some(input);
     }
-    fn _input_size(&mut self, input_size: u64) {
+    fn input_size(&mut self, input_size: u64) {
         self.input_size = input_size;
     }
-    fn _output_size(&mut self, output_size: u64) {
+    fn output_size(&mut self, output_size: u64) {
         self.output_size = output_size;
     }
-    fn _width(&mut self, width: u64) {
+    fn width(&mut self, width: u64) {
         self.width = width;
     }
-    fn _activation(&mut self, activation: Option<Activation>) {
+    fn activation(&mut self, activation: Option<Activation>) {
         self.activation = activation;
     }
 }
@@ -217,182 +180,39 @@ pub struct TrainnableLayer {
     pub output: Output,
     pub operation: Operation,
 }
-//NETWORK TRAITS//
-//Example:
-//let network:Vec<TrainnableLayer> = std_layer().len(10).activation(relu).next(std_layer).len(10).activation(relu).build()?;
-///The traits required to build a network from a layer as a trait alias
-//@DEPRECATED
-pub trait BuildableLayer: BuildLayer + LayerAccessor + ConfigurableLayer {} //+ InitializeLayer {}
-impl<T> BuildableLayer for T where T: BuildLayer + LayerAccessor + ConfigurableLayer {} //+ InitializeLayer {}
-impl<T> BuildLayer for &mut T
-where
-    T: BuildLayer,
-{
-    fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
-        (**self).build_layer(scope)
-    }
-}
-impl<T> LayerAccessor for &mut T
-where
-    T: LayerAccessor,
-{
-    fn get_input(&self) -> Option<Operation> {
-        (**self).get_input()
-    }
-    fn get_input_size(&self) -> u64 {
-        (**self).get_input_size()
-    }
-    fn get_output_size(&self) -> u64 {
-        (**self).get_output_size()
-    }
-    fn get_width(&self) -> u64 {
-        (**self).get_width()
-    }
-}
-impl<T> ConfigurableLayer for &mut T
-where
-    T: ConfigurableLayer,
-{
-    fn _input(&mut self, input: Operation) {
-        (**self)._input(input)
-    }
-    fn _input_size(&mut self, input_size: u64) {
-        (**self)._input_size(input_size)
-    }
-    fn _output_size(&mut self, output_size: u64) {
-        (**self)._output_size(output_size)
-    }
-    fn _width(&mut self, width: u64) {
-        (**self)._width(width)
-    }
-    fn _activation(&mut self, activation: Option<Activation>) {
-        (**self)._activation(activation)
-    }
-}
 
-//TODO: SIMPLIFY TRAITS //
-
-//TODO: fix Chaining blanket implementations and the framework is in alpha!
-//TODO: we should just be working with and initializing a Vector
-//TODO: get rid of next_layer call for now just write a method for
-//      LayerState since all layers are a type alias, later
-//      this can be with a trait object for non alias'
-//TODO: cleanup these traits via simplification and standardization
-//configured by the previous width value
-//TODO: need a trait that is impl for std_layer etc to method chain,
-//      cannot initialize in parameter?
-//TODO: consolidate these to one trait with initializer built in
-//TODO: Vec for appending is weird
 pub trait LayerChain<F, T> {
     fn next_layers(self, layer: F) -> Self
     where
         F: FnOnce() -> Vec<Box<T>>,
         T: Clone;
 }
-//TODO: redo lazy builder for application ergonomics (method chainning like keras)
-//impl<F, T> LayerChain<F, T> for &mut Vec<Box<T>> {
-//    fn next_layers(self, layer: F) -> Self
-//    where
-//        F: FnOnce() -> Vec<Box<T>>,
-//        T: Clone,
-//    {
-//        let res = layer();
-//        //TODO: move out
-//        self.push(res[0]);
-//        self
-//    }
-//}
-//impl<F, T> LayerChain<F, T> for Vec<Box<T>> {
-//    fn next_layers(self, layer: F) -> Self
-//    where
-//        F: FnOnce() -> Vec<Box<T>>,
-//        T: Clone,
-//    {
-//        let mut res = self;
-//        res.push(layer()[0]);
-//        res
-//    }
-//}
-//impl<T> ConfigurableLayer for Vec<Box<T>>
-//where
-//    T: ConfigurableLayer,
-//{
-//    fn _input(&mut self, input: Operation) {
-//        //TODO: I dont like these unwraps
-//        self.last_mut().unwrap()._input(input);
-//    }
-//    fn _input_size(&mut self, input_size: u64) {
-//        self.last_mut().unwrap()._input_size(input_size);
-//    }
-//    fn _output_size(&mut self, output_size: u64) {
-//        self.last_mut().unwrap()._output_size(output_size);
-//    }
-//    fn _width(&mut self, width: u64) {
-//        self.last_mut().unwrap()._width(width);
-//    }
-//    fn _activation(&mut self, activation: Option<Activation>) {
-//        self.last_mut().unwrap()._activation(activation);
-//    }
-//}
 
-//TODO: derive macro for InitializeLayer and ConfigurableLayer
-//blanket implementation for layer alias
-//TODO: build trait that returns Vec<TrainnableLayer> for a vector of boxed layers
-//      also sets input and output size based on the previous layer
 pub trait BuildNetwork {
     fn build(self, Scope: &mut Scope) -> Result<Vec<TrainnableLayer>, Status>;
 }
-////TODO: @DEPRECATED
-//impl BuildNetwork for Vec<Box<&mut dyn BuildableLayer>> {
-//    fn build(self, scope: &mut Scope) -> Result<Vec<TrainnableLayer>, Status> {
-//        let mut layers = Vec::new();
-//        let mut cur_width = 0;
-//        //translate width to input and output as we roll through the network layers
-//        for layer in self {
-//            if cur_width == 0 {
-//                cur_width = layer.get_width();
-//            }
-//            layer._input_size(cur_width);
-//            layer._output_size(layer.get_width());
-//            cur_width = layer.get_width();
-//            //TODO: build_layer needs to take width and set input and output
-//            layers.push(layer.build_layer(scope)?);
-//        }
-//        Ok(layers)
-//    }
-//}
-
-//add a self to the vector of layers that defines a network.
-//TODO: also chain a builder with get_input trait
-
-//TODO: @DEPRECATED replace this with a struct
-//A layer that has its width, height and activation function asigned. A node in the Tensorflow graph
-//ready for inputs and outputs to an XLA graphs scope.
-//pub type ActivatedLayer =
-//    dyn Fn(Output, &mut Scope) -> Result<(Vec<Variable>, Output, Operation), Status>;
 
 //LAYER DEFINITIONS//
-//TODO: style lints so function initializer and struct type are distinct, also need to follow Rust
-//      linting
-//pub type std_layer = LayerState;
-//TODO: just make this a struct with one entry, the procedural macro
-//      will still apply
+//each layer must inherite LayerState and derive ConfigurableLayer, LayerAccessor,
+//BuildLayer and InitializeLayer
+//
+//BuildLayer is the trait that defines the layers architecture, the rest are setters, getters and
+//defaults.
 pub struct std_layer(LayerState);
-//TODO: how can input: Operation be method chained? solve in a builder
 impl ConfigurableLayer for std_layer {
-    fn _input(&mut self, input: Operation) {
+    fn input(&mut self, input: Operation) {
         self.0.input = Some(input);
     }
-    fn _input_size(&mut self, input_size: u64) {
+    fn input_size(&mut self, input_size: u64) {
         self.0.input_size = input_size;
     }
-    fn _output_size(&mut self, output_size: u64) {
+    fn output_size(&mut self, output_size: u64) {
         self.0.output_size = output_size;
     }
-    fn _width(&mut self, width: u64) {
+    fn width(&mut self, width: u64) {
         self.0.width = width;
     }
-    fn _activation(&mut self, activation: Option<Activation>) {
+    fn activation(&mut self, activation: Option<Activation>) {
         self.0.activation = activation;
     }
 }
@@ -409,11 +229,6 @@ impl LayerAccessor for std_layer {
     fn get_width(&self) -> u64 {
         self.0.width
     }
-    //TODO: this getter isnt written correctly
-    //fn get_activation(&self) -> Option<impl Activate> {
-    //    //TODO: propagate this error
-    //    self.conf.activation
-    //}
 }
 impl BuildLayer for std_layer {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
@@ -989,7 +804,7 @@ pub struct norm_layer {
 /////    let mut merged_output: Option<Tensor<f32>> = None;
 /////    let mut final_error: Option<Tensor<f32>> = None;
 /////
-/////    for _ in 0..100000 {
+/////    for  in 0..100000 {
 /////        let mut run_args = SessionRunArgs::new();
 /////        run_args.add_target(&minimize);
 /////        let fetch_error = run_args.request_fetch(&Error, 0);

@@ -225,11 +225,11 @@ impl Brain {
             //TODO: need to setup the Input hook in the builder.
             //layer.get_input()?(layer_input_iter.clone().into());
 
-            layer._input(layer_input_iter.clone());
-            layer._input_size(input_size);
+            layer.input(layer_input_iter.clone());
+            layer.input_size(input_size);
             input_size = layer.get_width();
             output_size = layer.get_width();
-            layer._output_size(output_size);
+            layer.output_size(output_size);
             //TODO: end of extraction routine
 
             let parameters = layer.build_layer(&mut scope)?;
