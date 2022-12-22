@@ -88,6 +88,8 @@ extern crate tensorflow;
 //reuse architecture for this but rename and only struct ActivatedLayer
 
 //TODO: builder takes trait bounds on ActivatedLayer as a form generically returning self like iter()
+//TODO: why isnt Layer a trait object here? will this conflict with heterogeneous layer
+//      architectures at compile time?
 pub struct BrainBuilder<Layer: BuildLayer + LayerAccessor + ConfigurableLayer> {
     name: String,
     num_inputs: u64,
@@ -659,8 +661,9 @@ mod tests {
             println!("trained a batch");
         }
         //save the model
-        Net.save("test-initial").unwrap();
-
+        let uuid = Uuid::new_v4();
+        let save_file = format!("test-initial-{}", uuid);
+        Net.save(&save_file).unwrap();
         return;
     }
     //TODO:
@@ -670,8 +673,7 @@ mod tests {
         //TODO: also expose optional configuration such as Brain().inputs(2).dtype(bf16).layers::std_layer::new(1000, activations::Tanh(10)).build();
 
         //let mut Net = Brain::new("test-net", network, 2, 32.0, 10.0).unwrap();
-        let mut Net = Brain();
-        let mut Net = Net
+        let mut Net = Brain()
             .num_inputs(2)
             .add_layer(layers::std_layer::new(100, activations::Tanh(10)))
             .add_layer(layers::std_layer::new(100, activations::Tanh(10)))
@@ -695,8 +697,11 @@ mod tests {
             Net.train(inputs, outputs).unwrap();
             println!("trained a batch");
         }
+        //create a UUID string
+        let uuid = Uuid::new_v4().to_string();
+        let save_file = format!("test-builder-{}", uuid);
         //save the model
-        Net.save("test-builder").unwrap();
+        Net.save(save_file.as_str()).unwrap();
 
         return;
     }
