@@ -82,47 +82,39 @@ use layers::*;
 //extern crate derive_builder;
 extern crate tensorflow;
 
-//      consider using a builder struct that is a master class for new constructor, some of
-//      this isnt initialized, only need a builder for user parameters
-//builder should also take functions for layers and activations as a functional struct, possibly
-//reuse architecture for this but rename and only struct ActivatedLayer
-
-//TODO: builder takes trait bounds on ActivatedLayer as a form generically returning self like iter()
-//TODO: why isnt Layer a trait object here? will this conflict with heterogeneous layer
-//      architectures at compile time?
-pub struct BrainBuilder<Layer: BuildLayer + LayerAccessor + ConfigurableLayer> {
-    name: String,
+pub struct BrainBuilder<'a, Layer: BuildLayer + LayerAccessor + ConfigurableLayer> {
+    name: &'a str,
     num_inputs: u64,
     input_type: DataType,
+    //TODO: this is only a trait obj because optimizer isnt clone for method chaining
+    Optimizer: Option<Box<dyn Optimizer>>,
     layers: Vec<Layer>,
-    learning_rate: f32,
-    error_power: f32,
 }
 //TODO: This causes a temporary value dropped while building
 ///Constructor to initialize the BrainBuilder
-pub fn Brain<Layer>() -> BrainBuilder<Layer>
+pub fn Brain<'a, Layer>() -> BrainBuilder<'a, Layer>
 where
     Layer: BuildLayer + LayerAccessor + ConfigurableLayer,
 {
     BrainBuilder {
-        name: "Brain".to_string(),
+        name: "Brain",
         num_inputs: 0,
         input_type: DataType::Float,
+        Optimizer: None,
         layers: Vec::new(),
-        learning_rate: 0.01,
-        error_power: 1.0,
     }
 }
 //TODO: a trait or some way to do std_layer instead of add_layer(std_layer)
-impl<Layer> BrainBuilder<Layer>
+impl<'a, Layer> BrainBuilder<'a, Layer>
 where
     Layer: BuildLayer + LayerAccessor + ConfigurableLayer,
+    //Opt: Optimizer,
 {
     pub fn add_layer(mut self, layer: Layer) -> Self {
         self.layers.push(layer);
         self
     }
-    pub fn name(mut self, name: String) -> Self {
+    pub fn name(mut self, name: &'a str) -> Self {
         self.name = name;
         self
     }
@@ -134,15 +126,11 @@ where
         self.input_type = input_type;
         self
     }
-    pub fn learning_rate(mut self, learning_rate: f32) -> Self {
-        self.learning_rate = learning_rate;
+    pub fn optimizer(mut self, optimizer: Box<dyn Optimizer>) -> Self {
+        self.Optimizer = Some(optimizer);
         self
     }
-    pub fn error_power(mut self, error_power: f32) -> Self {
-        self.error_power = error_power;
-        self
-    }
-    pub fn build(mut self) -> Result<Brain, Status> {
+    pub fn build(mut self, scope: &mut Scope) -> Result<Brain, Status> {
         //TODO: ~Just Rust Things~
         let mut layers = Vec::new();
         for i in 0..self.layers.len() {
@@ -150,21 +138,34 @@ where
         }
         layers.reverse();
 
-        //move self.layers to a local variable named layers since self.layers isnt clone
-        Brain::new(
-            self.name,
-            layers,
-            self.num_inputs,
-            self.input_type,
-            self.learning_rate,
-            self.error_power,
-        )
+        //TODO: default condition for optimizer is verbose because tensorflow-rs
+        //doesnt use a trait for constructing optimizers (yet).
+        if self.Optimizer.is_none() {
+            let sgd = GradientDescentOptimizer::new(ops::constant(0.01 as f32, scope)?);
+            return Brain::new(
+                self.name.to_string(),
+                layers,
+                Some(Box::new(sgd)),
+                self.num_inputs,
+                self.input_type,
+                scope,
+            );
+        } else {
+            return Brain::new(
+                self.name.to_string(),
+                layers,
+                self.Optimizer,
+                self.num_inputs,
+                self.input_type,
+                scope,
+            );
+        }
     }
 }
 
-pub struct Brain {
+pub struct Brain<'a> {
     /// Tensorflow objects for user abstraction from Tensorflow
-    scope: Scope,
+    scope: &'a mut Scope,
     session: Session,
     session_options: SessionOptions,
     ///each layers output for the network
@@ -184,10 +185,8 @@ pub struct Brain {
     SavedModelSaver: RefCell<Option<SavedModelSaver>>,
     ///user specified name of this model
     name: String,
-    ///the error power for scaling the error gradient's pressure on the weights
-    error_power: f32,
 }
-impl Brain {
+impl<'a> Brain<'a> {
     //TODO: type safety: use trait bounds to allow for using bigints etc for counting//indexing
     //      types.
     pub fn new<Layer: BuildLayer + LayerAccessor + ConfigurableLayer>(
@@ -196,16 +195,20 @@ impl Brain {
         //soon as possible
         layers: Vec<Layer>,
         //TODO: optimizer,
+        optimizer: Option<Box<dyn Optimizer>>,
         num_inputs: u64,
         input_type: DataType,
-        learning_rate: f32,
-        error_power: f32,
+        scope: &mut Scope,
     ) -> Result<Brain, Status> {
-        let mut scope = Scope::new_root_scope();
+        //propagate an error if optimizer is none
+        let optimizer = optimizer.unwrap();
+
+        let mut scope = scope;
 
         let mut input_size = num_inputs;
         let mut output_size = layers[0].get_width();
-        //TODO: may want more than a vector rank dimension
+        //TODO: may want more than a vector rank dimension, use this with an axis
+        //unroll to batch in inputs therefor: +1 Rank
         let Input = ops::Placeholder::new()
             //.dtype(DataType::Float)
             .dtype(input_type)
@@ -219,9 +222,6 @@ impl Brain {
 
         //CONSTRUCT NETWORK
         //TODO: extract this to a builder pattern for constructor readability.
-        //TODO: builder should also take a function that defines this, really we need the input and
-        //output to get all the checkpointing/trainning features. helper functions can make this
-        //function easier to define elsewhere
 
         //trainnable variables
         let mut net_vars = vec![];
@@ -230,11 +230,9 @@ impl Brain {
 
         let mut layer_input_iter = Input.clone();
         for mut layer in layers {
-            //TODO: assign Input to each layer. extract this to builder later
+            //TODO: assign Input to each layer. extract this to builder later?
             //TODO: this should already be done in layer builder
             //      (not the aformbentioned Brain builder)
-            //TODO: need to setup the Input hook in the builder.
-            //layer.get_input()?(layer_input_iter.clone().into());
 
             layer = layer.input(layer_input_iter.clone());
             layer = layer.input_size(input_size);
@@ -263,31 +261,25 @@ impl Brain {
         let SavedModelSaver = RefCell::new(None);
 
         //TODO: pass this in? this should be modular so new implementations can be tried
-        let mut optimizer = AdadeltaOptimizer::new();
-        optimizer.set_learning_rate(ops::constant(learning_rate, &mut scope)?);
+        //let mut optimizer = AdadeltaOptimizer::new();
+        //TODO: extract this default to Builder
+
         // let mut optimizer =
         //     GradientDescentOptimizer::new(ops::constant(learning_rate, &mut scope)?);
 
         // DEFINE ERROR FUNCTION //
-        //TODO: pass this in conditionally, give user output and label with
-        //      a partial constructor then they supply error and construction is complete
-        //      two structs? whats standard functionally for partial construction?
-        //  ^this is important for reinforcement learning where label difference should be output gradient direction (multiplication)
-        //TODO: use setters instead and have a default object behaviour.
-
-        //default error is pythagorean distance
-        let Error = ops::sqrt(
-            ops::pow(
-                ops::sub(Output.clone(), Label.clone(), &mut scope)?,
-                ops::constant(2.0 as f32, &mut scope)?,
+        // TODO: pass this in and offer some default helper functions within the framework
+        //default error is distance, we should expose this for cross entropy etc
+        let Error = ops::square(
+            ops::abs(
+                ops::sub(
+                    Output.clone(),
+                    Label.clone(),
+                    &mut scope.with_op_name("error"),
+                )?,
                 &mut scope,
             )?,
             &mut scope,
-        )?;
-        let Error = ops::pow(
-            Error.clone(),
-            ops::constant(error_power, &mut scope).unwrap(),
-            &mut scope.with_op_name("error"),
         )?;
 
         let (minimize_vars, minimize) = optimizer
@@ -320,7 +312,6 @@ impl Brain {
             Label,
             Output_op,
             Error,
-            error_power,
             minimize_vars,
             minimize,
             SavedModelSaver,
@@ -457,7 +448,8 @@ impl Brain {
         Ok(())
     }
 
-    //TODO: should also return error (need to structure output I'm allergic to tuples
+    // TODO: should also return error (need to structure output I'm allergic to tuples)
+    // TODO: should pass in a threshold fitness to prevent over trainning
     /// Train the network with the given inputs and labels (must be synchronized in index order)
     ///
     ///**PARAMETERS**:
@@ -470,9 +462,10 @@ impl Brain {
     pub fn train<T: tensorflow::TensorType>(
         // &mut self,
         &mut self,
-        inputs: Vec<Vec<T>>,
-        labels: Vec<Vec<T>>,
+        inputs: &Vec<Vec<T>>,
+        labels: &Vec<Vec<T>>,
     ) -> Result<Vec<Tensor<f32>>, Box<dyn Error>> {
+        //TODO: do we lose variable state each session?
         //TODO: k-folding extension method
         assert_eq!(inputs.len(), labels.len());
         log::debug!("trainning..");
@@ -491,6 +484,10 @@ impl Brain {
         let mut i = 0;
         let mut avg_t = vec![];
         //TODO: dont loop this send it all to the VRAM and unroll the n-1 dimensional input tensor,
+        //its up to the architect to ensure this fits in memory
+        //unroll op occurs in graph declaration (Brain constructor).
+        //this just makes a +1 Rank
+        //tensor from Vec<Vec<T>>, runs session and creates a Vec<Vec<T>> from the output
         loop {
             // start a timer
             let start = Instant::now();
@@ -517,14 +514,16 @@ impl Brain {
             let mut run_args = SessionRunArgs::new();
             run_args.add_target(&self.minimize);
 
-            let error_squared_fetch = run_args.request_fetch(&self.Error, 0);
+            let error = run_args.request_fetch(&self.Error, 0);
             let output = run_args.request_fetch(&self.Output_op, 0);
             run_args.add_feed(&self.Input, 0, &input_tensor);
             run_args.add_feed(&self.Label, 0, &label_tensor);
             self.session.run(&mut run_args)?;
 
-            let res: Tensor<f32> = run_args.fetch(error_squared_fetch)?;
+            let res: Tensor<f32> = run_args.fetch(error)?;
             let output: Tensor<T> = run_args.fetch(output)?;
+            //TODO: instead of logging these should be accessible within a local class buffer
+            //Vec<TrainOutput> or [TrainOutput; configured_recency_buffer_size]
 
             // get how long has passed
             let elapsed = start.elapsed();
@@ -556,7 +555,7 @@ impl Brain {
 
     pub fn infer<T: tensorflow::TensorType>(
         &self,
-        inputs: Vec<Vec<T>>,
+        inputs: &Vec<Vec<T>>,
     ) -> Result<Vec<Tensor<T>>, Box<dyn Error>> {
         let mut result = vec![];
         let mut input_tensor: Tensor<T> = Tensor::new(&[1u64, inputs[0].len() as u64]);
@@ -606,6 +605,7 @@ mod tests {
     use crate::*;
     #[test]
     fn test_initial() {
+        let mut scope = Scope::new_root_scope();
         let network = vec![
             //layers::std_layer::new(2, activations::Tanh(10)),
             layers::std_layer::new(100, activations::Tanh(10), DataType::Float),
@@ -614,12 +614,15 @@ mod tests {
         ];
 
         let mut Net = Brain::new(
-            "test-net".to_string(),
+            "test-initial".to_string(),
             network,
+            //TODO: this is recklessly verbose
+            Some(Box::new(GradientDescentOptimizer::new(
+                ops::constant(0.1 as f32, &mut scope).unwrap(),
+            ))),
             2,
             DataType::Float,
-            32.0,
-            10.0,
+            &mut scope,
         )
         .unwrap();
 
@@ -629,15 +632,15 @@ mod tests {
         for _ in 0..100 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
-            for _ in 0..100 {
+            for _ in 0..10 {
                 // instead of the above, generate either 0 or 1 and cast to f32
                 let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
                 let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
                 inputs.push(input);
                 outputs.push(output);
             }
-            let _res = Net.train(inputs, outputs).unwrap();
-            println!("trained a batch");
+            let res = Net.train(&inputs, &outputs).unwrap();
+            //println!("inputs: {:?} \n res: {:?}", inputs, res);
         }
         //save the model
         let uuid = Uuid::new_v4();
@@ -645,60 +648,70 @@ mod tests {
         Net.save(&save_file).unwrap();
         return;
     }
-    //TODO:
     #[test]
     fn test_builder() {
-        //TODO: defaults should be enforced such that they arent required when creating a layer
-
+        let mut scope = Scope::new_root_scope();
         let mut Net = Brain()
+            .name("test-builder")
             .num_inputs(2)
+            .input_type(DataType::Float)
             //TODO: input_type(DataType::Float)
             .add_layer(layers::std_layer::new(
-                100,
-                activations::Tanh(10),
+                20,
+                activations::Sigmoid(1),
                 DataType::Float,
             ))
             .add_layer(layers::std_layer::new(
-                100,
-                activations::Tanh(10),
-                DataType::Float,
-            ))
-            .add_layer(layers::std_layer::new(
-                1,
-                activations::Relu(),
+                20,
+                activations::Sigmoid(1),
                 DataType::Float,
             ))
             .add_layer(layers::std_layer::new(
                 1,
-                activations::Sigmoid(100),
+                activations::Sigmoid(1),
                 DataType::Float,
             ))
-            .build()
+            //TODO: there should be a helper function for this, we may create
+            //our own wrapper trait here if its better than a trait in tensorflow-rs
+            //.optimizer(Box::new(GradientDescentOptimizer::new(
+            //    ops::constant(0.001 as f32, &mut scope).unwrap(),
+            //)))
+            .optimizer(Box::new({
+                let mut res = AdadeltaOptimizer::new();
+                res.set_learning_rate(ops::constant(1.0 as f32, &mut scope).unwrap());
+                res
+            }))
+            .build(&mut scope)
             .unwrap();
 
         //train the network
         let mut rrng = rand::thread_rng();
         // create 100 entries for inputs and outputs of xor
-        for _ in 0..100 {
+        for _ in 0..200 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
-            for _ in 0..100 {
+            for _ in 0..200 {
                 // instead of the above, generate either 0 or 1 and cast to f32
                 let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
                 let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
                 inputs.push(input);
                 outputs.push(output);
             }
-            let res = Net.train(inputs, outputs).unwrap();
-            println!("trained a batch");
+            assert_eq!(inputs.len(), outputs.len());
+            let res = Net.train(&inputs, &outputs).unwrap();
         }
         //print the output of the network
         let mut input: Vec<Vec<f32>> = vec![vec![0.0, 1.0]];
         input.push(vec![1.0, 0.0]);
-        input.push(vec![1.0, 0.0]);
+        input.push(vec![0.0, 0.0]);
+        input.push(vec![1.0, 1.0]);
 
-        let output = Net.infer(input).unwrap();
-        println!("output: {:?}", output);
+        let output = Net.infer(&input).unwrap();
+        println!(
+            "XOR test input: {:?} \n XOR test output: {:?}",
+            input, output
+        );
+
         //create a UUID string
         let uuid = Uuid::new_v4().to_string();
         let save_file = format!("test-builder-{}", uuid);
