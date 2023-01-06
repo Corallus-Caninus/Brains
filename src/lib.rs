@@ -93,6 +93,7 @@ extern crate tensorflow;
 pub struct BrainBuilder<Layer: BuildLayer + LayerAccessor + ConfigurableLayer> {
     name: String,
     num_inputs: u64,
+    input_type: DataType,
     layers: Vec<Layer>,
     learning_rate: f32,
     error_power: f32,
@@ -106,6 +107,7 @@ where
     BrainBuilder {
         name: "Brain".to_string(),
         num_inputs: 0,
+        input_type: DataType::Float,
         layers: Vec::new(),
         learning_rate: 0.01,
         error_power: 1.0,
@@ -128,6 +130,10 @@ where
         self.num_inputs = num_inputs;
         self
     }
+    pub fn input_type(mut self, input_type: DataType) -> Self {
+        self.input_type = input_type;
+        self
+    }
     pub fn learning_rate(mut self, learning_rate: f32) -> Self {
         self.learning_rate = learning_rate;
         self
@@ -142,12 +148,14 @@ where
         for i in 0..self.layers.len() {
             layers.push(self.layers.pop().unwrap());
         }
+        layers.reverse();
 
         //move self.layers to a local variable named layers since self.layers isnt clone
         Brain::new(
             self.name,
             layers,
             self.num_inputs,
+            self.input_type,
             self.learning_rate,
             self.error_power,
         )
@@ -187,8 +195,9 @@ impl Brain {
         //TODO: a vec of layers here will suffice for now, but this will be a builder pattern as
         //soon as possible
         layers: Vec<Layer>,
+        //TODO: optimizer,
         num_inputs: u64,
-        //activation: Activation,
+        input_type: DataType,
         learning_rate: f32,
         error_power: f32,
     ) -> Result<Brain, Status> {
@@ -198,11 +207,13 @@ impl Brain {
         let mut output_size = layers[0].get_width();
         //TODO: may want more than a vector rank dimension
         let Input = ops::Placeholder::new()
-            .dtype(DataType::Float)
+            //.dtype(DataType::Float)
+            .dtype(input_type)
             .shape([1u64, input_size])
             .build(&mut scope.with_op_name("input"))?;
         let Label = ops::Placeholder::new()
-            .dtype(DataType::Float)
+            //.dtype(DataType::Float)
+            .dtype(layers.last().unwrap().get_dtype())
             .shape([1u64, *layers[layers.len() - 1].get_width()])
             .build(&mut scope.with_op_name("label"))?;
 
@@ -241,7 +252,10 @@ impl Brain {
             net_layers.push(output.clone());
 
             layer_input_iter = parameters.operation;
+            println!("layer: {:?}", layer_input_iter);
+            println!("layer_width: {:?}", layer.get_width());
         }
+        //TODO: off by 1 at output
         let Output = net_layers.last().unwrap().clone();
         let Output_op = Output.operation.clone();
 
@@ -443,6 +457,7 @@ impl Brain {
         Ok(())
     }
 
+    //TODO: should also return error (need to structure output I'm allergic to tuples
     /// Train the network with the given inputs and labels (must be synchronized in index order)
     ///
     ///**PARAMETERS**:
@@ -473,9 +488,6 @@ impl Brain {
         let mut input_iter = inputs.into_iter();
         let mut label_iter = labels.into_iter();
 
-        //initialize iteration
-        input_iter.next();
-        label_iter.next();
         let mut i = 0;
         let mut avg_t = vec![];
         //TODO: dont loop this send it all to the VRAM and unroll the n-1 dimensional input tensor,
@@ -542,68 +554,36 @@ impl Brain {
     //TODO: search iterations should see different datasets/epochs of dataset (not actual epoch backprop) via k-folding
     //      also cross validate the k-fold
 
-    /// forward pass and return the output of the network.
     pub fn infer<T: tensorflow::TensorType>(
         &self,
-        inputs: Tensor<T>,
-    ) -> Result<Tensor<T>, Box<dyn Error>> {
-        let mut run_args = SessionRunArgs::new();
-        let output = run_args.request_fetch(&self.Output_op, 0);
-        run_args.add_feed(&self.Input, 0, &inputs);
-
-        self.session.run(&mut run_args)?;
-
-        let output: Tensor<T> = run_args.fetch(output)?;
-        Ok(output)
-    }
-
-    /// Online reinforcement learning method.
-    ///
-    /// Takes the given inputs and fitness function and backprops the network once,
-    /// returning the output output vector.
-    /// This should be called as an online (realtime) reinforcment learning technique
-    /// where labels can be formed given a fitness function.
-    ///
-    ///PARAMETERS:
-    /// returns the output from the network for online learning implementation.
-    ///
-    /// Fitness function takes a 1D tensor of length output and returns a label tensor of same shape.
-    pub fn evaluate(
-        &mut self,
-        inputs: Vec<f32>,
-        //TODO: make this internal to class as builder so we dont clone the dyn ref alot ITL
-        //TODO: refactor the names here to make this more intuitive
-        fitness_function: Box<dyn Fn(&Tensor<f32>) -> Tensor<f32>>,
-    ) -> Result<Tensor<f32>, Box<dyn Error>> {
-        // let mut label_tensor: Tensor<T> = Tensor::new(&[1u64, labels.len() as u64]);
-        // now assign the input and label to the tensor
-        let mut input_tensor = Tensor::new(&[1u64, inputs.len() as u64]);
-        for i in 0..inputs.len() {
-            input_tensor[i] = inputs[i].clone();
+        inputs: Vec<Vec<T>>,
+    ) -> Result<Vec<Tensor<T>>, Box<dyn Error>> {
+        let mut result = vec![];
+        let mut input_tensor: Tensor<T> = Tensor::new(&[1u64, inputs[0].len() as u64]);
+        let mut input_iter = inputs.into_iter();
+        let mut i = 0;
+        loop {
+            i += 1;
+            let input = input_iter.next();
+            if input.is_none() {
+                break;
+            }
+            let input = input.unwrap();
+            // now get input and label as slices
+            let input = input.as_slice();
+            // now assign the input and label to the tensor
+            for i in 0..input.len() {
+                input_tensor[i] = input[i].clone();
+            }
+            let mut run_args = SessionRunArgs::new();
+            let output = run_args.request_fetch(&self.Output_op, 0);
+            run_args.add_feed(&self.Input, 0, &input_tensor);
+            self.session.run(&mut run_args)?;
+            let output: Tensor<T> = run_args.fetch(output)?;
+            log::info!("input: {:?} output: {:?}", input, output);
+            result.push(output);
         }
-
-        // call infer to get the output
-        let outputs = self.infer(input_tensor.clone())?;
-
-        //create labels using fitness function
-        let reward = fitness_function(&outputs);
-
-        //backprop
-        let mut run_args = SessionRunArgs::new();
-        run_args.add_target(&self.minimize);
-
-        let error_squared_fetch = run_args.request_fetch(&self.Error, 0);
-        // set output feed manually
-        //TODO: runtime says we need to feed input again so create a placeholder tensor of 0
-        run_args.add_feed(&self.Input, 0, &input_tensor);
-        // run_args.add_feed(&self.Output_op, 0, &outputs);
-        run_args.add_feed(&self.Label, 0, &reward);
-        self.session.run(&mut run_args)?;
-
-        let cur_error: Tensor<f32> = run_args.fetch(error_squared_fetch)?;
-
-        //return the output
-        Ok(outputs.clone())
+        Ok(result)
     }
 }
 
@@ -624,26 +604,24 @@ impl SerializedNetwork {
 #[cfg(test)]
 mod tests {
     use crate::*;
-    //TODO: these need a better constructor at the brain level, fix after layer is refactored
     #[test]
     fn test_initial() {
-        //first, we create the network as a Vector of Layers
-        //TODO: internal builder with method chaining instead of vec of Layers
-        //TODO: can build a call stack with vec push fn's then call
-        //      sequentially with build for lazy builder.
-        //      Since each argument is len 1 use a tuple Vec<(fn, arg)>
-        //      use fn -> arg repetition pattern in builder trait.
-        //      a lazy builder on a lazy builder.
-        //let network = std().width(10).activation(activations::tanh(100)).std().width(10).activation(activations::tanh(100));
-        //TODO: extract this routine into builder
         let network = vec![
             //layers::std_layer::new(2, activations::Tanh(10)),
-            layers::std_layer::new(100, activations::Tanh(10)),
-            layers::std_layer::new(100, activations::Tanh(10)),
-            layers::std_layer::new(1, activations::Sigmoid(100)),
+            layers::std_layer::new(100, activations::Tanh(10), DataType::Float),
+            layers::std_layer::new(100, activations::Tanh(10), DataType::Float),
+            layers::std_layer::new(1, activations::Sigmoid(100), DataType::Float),
         ];
 
-        let mut Net = Brain::new("test-net".to_string(), network, 2, 32.0, 10.0).unwrap();
+        let mut Net = Brain::new(
+            "test-net".to_string(),
+            network,
+            2,
+            DataType::Float,
+            32.0,
+            10.0,
+        )
+        .unwrap();
 
         //train the network
         let mut rrng = rand::thread_rng();
@@ -658,7 +636,7 @@ mod tests {
                 inputs.push(input);
                 outputs.push(output);
             }
-            Net.train(inputs, outputs).unwrap();
+            let _res = Net.train(inputs, outputs).unwrap();
             println!("trained a batch");
         }
         //save the model
@@ -670,15 +648,31 @@ mod tests {
     //TODO:
     #[test]
     fn test_builder() {
-        //TODO: Brain().inputs(2).layer(layers::std_layer::new(1000, activations::Tanh(10))).layer(layers::std_layer::new(1, activations::Tanh(10))).build();
-        //TODO: also expose optional configuration such as Brain().inputs(2).dtype(bf16).layers::std_layer::new(1000, activations::Tanh(10)).build();
+        //TODO: defaults should be enforced such that they arent required when creating a layer
 
-        //let mut Net = Brain::new("test-net", network, 2, 32.0, 10.0).unwrap();
         let mut Net = Brain()
             .num_inputs(2)
-            .add_layer(layers::std_layer::new(100, activations::Tanh(10)))
-            .add_layer(layers::std_layer::new(100, activations::Tanh(10)))
-            .add_layer(layers::std_layer::new(1, activations::Sigmoid(100)))
+            //TODO: input_type(DataType::Float)
+            .add_layer(layers::std_layer::new(
+                100,
+                activations::Tanh(10),
+                DataType::Float,
+            ))
+            .add_layer(layers::std_layer::new(
+                100,
+                activations::Tanh(10),
+                DataType::Float,
+            ))
+            .add_layer(layers::std_layer::new(
+                1,
+                activations::Relu(),
+                DataType::Float,
+            ))
+            .add_layer(layers::std_layer::new(
+                1,
+                activations::Sigmoid(100),
+                DataType::Float,
+            ))
             .build()
             .unwrap();
 
@@ -695,9 +689,16 @@ mod tests {
                 inputs.push(input);
                 outputs.push(output);
             }
-            Net.train(inputs, outputs).unwrap();
+            let res = Net.train(inputs, outputs).unwrap();
             println!("trained a batch");
         }
+        //print the output of the network
+        let mut input: Vec<Vec<f32>> = vec![vec![0.0, 1.0]];
+        input.push(vec![1.0, 0.0]);
+        input.push(vec![1.0, 0.0]);
+
+        let output = Net.infer(input).unwrap();
+        println!("output: {:?}", output);
         //create a UUID string
         let uuid = Uuid::new_v4().to_string();
         let save_file = format!("test-builder-{}", uuid);

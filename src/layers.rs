@@ -63,6 +63,8 @@ pub trait LayerAccessor {
     fn get_input_size(&self) -> &u64;
     fn get_output_size(&self) -> &u64;
     fn get_width(&self) -> &u64;
+    fn get_activation(&self) -> &Option<Activation>;
+    fn get_dtype(&self) -> DataType;
     //TODO: technically we need get_activation to complete the pattern
     //fn get_activation(self) -> Option<Box<dyn Activation>>;
 }
@@ -75,6 +77,7 @@ pub trait ConfigurableLayer {
     fn output_size(self, output_size: u64) -> Self;
     fn width(self, width: u64) -> Self;
     fn activation(self, activation: Option<Activation>) -> Self;
+    fn dtype(self, dtype: DataType) -> Self;
 }
 
 ///Layer constructor trait with default values.
@@ -85,18 +88,18 @@ pub trait InitializeLayer {
 }
 
 pub trait ConfigureLayer {
-    fn config(self, width: u64, activation: Activation) -> Self;
+    fn config(self, width: u64, activation: Activation, dtype: DataType) -> Self;
 }
 impl<T> ConfigureLayer for T
 where
     T: ConfigurableLayer,
 {
-    fn config(mut self, width: u64, activation: Activation) -> T {
-        self.width(width).activation(Some(activation))
+    fn config(mut self, width: u64, activation: Activation, dtype: DataType) -> T {
+        self.width(width).activation(Some(activation)).dtype(dtype)
     }
 }
 pub trait build_layer {
-    fn new(width: u64, activation: Activation) -> Self
+    fn new(width: u64, activation: Activation, dtype: DataType) -> Self
     where
         Self: Sized;
 }
@@ -104,8 +107,8 @@ impl<T> build_layer for T
 where
     T: ConfigurableLayer + InitializeLayer,
 {
-    fn new(width: u64, activation: Activation) -> Self {
-        Self::init().config(width, activation)
+    fn new(width: u64, activation: Activation, dtype: DataType) -> Self {
+        Self::init().config(width, activation, dtype)
     }
 }
 
@@ -120,6 +123,7 @@ pub struct LayerState {
     width: u64,
     //TODO: remove dyn here
     activation: Option<Activation>,
+    dtype: DataType,
 }
 impl InitializeLayer for LayerState {
     fn init() -> Self {
@@ -129,6 +133,7 @@ impl InitializeLayer for LayerState {
             output_size: 0,
             width: 0,
             activation: None,
+            dtype: DataType::Float,
         }
     }
 }
@@ -151,6 +156,10 @@ impl ConfigurableLayer for LayerState {
     }
     fn activation(mut self, activation: Option<Activation>) -> Self {
         self.activation = activation;
+        self
+    }
+    fn dtype(mut self, dtype: DataType) -> Self {
+        self.dtype = dtype;
         self
     }
 }
@@ -194,7 +203,12 @@ where
         self.get_mut_layer_state().activation = activation;
         self
     }
+    fn dtype(mut self, dtype: DataType) -> Self {
+        self.get_mut_layer_state().dtype = dtype;
+        self
+    }
 }
+//TODO: should this also include Activation and dtype?
 impl<L> LayerAccessor for L
 where
     L: InheritState,
@@ -210,6 +224,12 @@ where
     }
     fn get_width(&self) -> &u64 {
         &self.get_layer_state().width
+    }
+    fn get_activation(&self) -> &Option<Activation> {
+        &self.get_layer_state().activation
+    }
+    fn get_dtype(&self) -> DataType {
+        self.get_layer_state().dtype
     }
 }
 
@@ -231,10 +251,16 @@ impl InheritState for std_layer {
 impl BuildLayer for std_layer {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
         //TODO: regex this inline
-        let input_size = self.0.input_size;
-        let output_size = self.0.output_size;
+        //let input_size = self.0.input_size;
+        //instead use the accessor
+        let input_size = *self.get_input_size();
+        //let output_size = self.0.output_size;
+        let output_size = *self.get_output_size();
         //tensorflow status
-        let input = self.0.input.clone().unwrap(); //TODO: propagate this with the weird status
+        //let input = self.0.input.clone().unwrap(); //TODO: propagate this with the weird status
+        let input = self.get_input().clone().unwrap();
+        //let dtype = self.0.dtype;
+        let dtype = self.get_layer_state().dtype;
         let mut scope = scope.new_sub_scope("layer"); //TODO: layer counter or some uuid
         let scope = &mut scope;
         let w_shape = ops::constant(&[input_size as i64, output_size as i64][..], scope)?;
@@ -246,10 +272,12 @@ impl BuildLayer for std_layer {
         let w = Variable::builder()
             .initial_value(
                 ops::RandomStandardNormal::new()
-                    .dtype(DataType::Float)
+                    //.dtype(DataType::Float)
+                    .dtype(dtype)
                     .build(w_shape, scope)?,
             )
-            .data_type(DataType::Float)
+            //.data_type(DataType::Float)
+            .data_type(dtype)
             .shape([input_size, output_size])
             .build(&mut scope.with_op_name("w"))?;
 
@@ -268,7 +296,8 @@ impl BuildLayer for std_layer {
                 //     .dtype(DataType::Float)
                 //     .build(ops::constant(&[1i64,output_size as i64][..], scope)?, scope)?,
             )
-            .data_type(DataType::Float)
+            //.data_type(DataType::Float)
+            .data_type(dtype)
             .shape(&[1i64, output_size as i64][..])
             .build(&mut scope.with_op_name("b"))?;
 
@@ -300,6 +329,7 @@ impl InitializeLayer for std_layer {
             output_size: 0,
             width: 0,
             activation: None,
+            dtype: DataType::Float,
         })
     }
 }
