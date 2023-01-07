@@ -1,5 +1,6 @@
 //activation functions are pure functions that define how each node/neuron is activated
 use tensorflow::ops;
+use tensorflow::DataType;
 use tensorflow::Operation;
 use tensorflow::Output;
 use tensorflow::Scope;
@@ -33,28 +34,14 @@ use tensorflow::Status;
 pub struct Activation {
     pub function: Box<dyn Fn(Output, &mut Scope) -> Result<Operation, Status>>,
 }
-pub fn Tanh(max_integer: u32) -> Activation {
+pub fn Tanh() -> Activation {
     Activation {
-        function: Box::new(move |output, scope| {
-            Ok(ops::multiply(
-                ops::tanh(output, scope)?,
-                ops::constant(max_integer as f32, scope)?,
-                scope,
-            )?
-            .into())
-        }),
+        function: Box::new(move |output, scope| ops::tanh(output, scope)),
     }
 }
-pub fn Sigmoid(max_integer: u32) -> Activation {
+pub fn Sigmoid() -> Activation {
     Activation {
-        function: Box::new(move |output, scope| {
-            Ok(ops::multiply(
-                ops::sigmoid(output, scope)?,
-                ops::constant(max_integer as f32, scope)?,
-                scope,
-            )?
-            .into())
-        }),
+        function: Box::new(move |output, scope| ops::sigmoid(output, scope)),
     }
 }
 pub fn Relu() -> Activation {
@@ -62,40 +49,6 @@ pub fn Relu() -> Activation {
         function: Box::new(move |output, scope| Ok(ops::relu(output, scope)?.into())),
     }
 }
-//impl Activation for Tanh {
-//    fn function(&self, output: Output, scope: &mut Scope) -> Result<Operation, Status> {
-//        Ok(ops::multiply(
-//            ops::tanh(output, scope)?,
-//            ops::constant(self.max_integer as f32, scope)?,
-//            scope,
-//        )?
-//        .into())
-//    }
-//}
-//pub fn tanh(max_integer: u32) -> Box<Tanh> {
-//    Box::new(Tanh { max_integer })
-//}
-//TOOD: with trait not type alias
-//pub fn relu(max_integer: u32) -> Activation {
-//    Box::new(move |output, scope| {
-//        Ok(ops::multiply(
-//            ops::relu(output, scope)?,
-//            ops::constant(max_integer as f32, scope)?,
-//            scope,
-//        )?
-//        .into())
-//    })
-//}
-//pub fn sigmoid(max_integer: u32) -> Activation {
-//    Box::new(move |output, scope| {
-//        Ok(ops::multiply(
-//            ops::sigmoid(output, scope)?,
-//            ops::constant(max_integer as f32, scope)?,
-//            scope,
-//        )?
-//        .into())
-//    })
-//}
 
 //fn elu
 //etc..

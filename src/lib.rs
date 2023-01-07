@@ -16,8 +16,8 @@
 mod activations;
 mod layers;
 use anyhow::Context;
-use half::bf16;
-use half::f16;
+//use half::bf16;
+//use half::f16;
 use log;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
@@ -85,7 +85,7 @@ extern crate tensorflow;
 pub struct BrainBuilder<'a, Layer: BuildLayer + LayerAccessor + ConfigurableLayer> {
     name: &'a str,
     num_inputs: u64,
-    input_type: DataType,
+    dtype: DataType,
     //TODO: this is only a trait obj because optimizer isnt clone for method chaining
     Optimizer: Option<Box<dyn Optimizer>>,
     layers: Vec<Layer>,
@@ -99,7 +99,7 @@ where
     BrainBuilder {
         name: "Brain",
         num_inputs: 0,
-        input_type: DataType::Float,
+        dtype: DataType::Float,
         Optimizer: None,
         layers: Vec::new(),
     }
@@ -122,8 +122,8 @@ where
         self.num_inputs = num_inputs;
         self
     }
-    pub fn input_type(mut self, input_type: DataType) -> Self {
-        self.input_type = input_type;
+    pub fn dtype(mut self, dtype: DataType) -> Self {
+        self.dtype = dtype;
         self
     }
     pub fn optimizer(mut self, optimizer: Box<dyn Optimizer>) -> Self {
@@ -147,7 +147,7 @@ where
                 layers,
                 Some(Box::new(sgd)),
                 self.num_inputs,
-                self.input_type,
+                self.dtype,
                 scope,
             );
         } else {
@@ -156,18 +156,21 @@ where
                 layers,
                 self.Optimizer,
                 self.num_inputs,
-                self.input_type,
+                self.dtype,
                 scope,
             );
         }
     }
 }
 
+//TODO: what else should be exposed as brain state? e.g.: dtype?
 pub struct Brain<'a> {
     /// Tensorflow objects for user abstraction from Tensorflow
     scope: &'a mut Scope,
     session: Session,
     session_options: SessionOptions,
+    ///the DataType for the network operations
+    dtype: DataType,
     ///each layers output for the network
     net_layers: Vec<Output>,
     ///all the trainable parameters of the network
@@ -197,7 +200,7 @@ impl<'a> Brain<'a> {
         //TODO: optimizer,
         optimizer: Option<Box<dyn Optimizer>>,
         num_inputs: u64,
-        input_type: DataType,
+        dtype: DataType,
         scope: &mut Scope,
     ) -> Result<Brain, Status> {
         //propagate an error if optimizer is none
@@ -211,12 +214,12 @@ impl<'a> Brain<'a> {
         //unroll to batch in inputs therefor: +1 Rank
         let Input = ops::Placeholder::new()
             //.dtype(DataType::Float)
-            .dtype(input_type)
+            .dtype(dtype)
             .shape([1u64, input_size])
             .build(&mut scope.with_op_name("input"))?;
         let Label = ops::Placeholder::new()
             //.dtype(DataType::Float)
-            .dtype(layers.last().unwrap().get_dtype())
+            .dtype(dtype)
             .shape([1u64, *layers[layers.len() - 1].get_width()])
             .build(&mut scope.with_op_name("label"))?;
 
@@ -234,6 +237,8 @@ impl<'a> Brain<'a> {
             //TODO: this should already be done in layer builder
             //      (not the aformbentioned Brain builder)
 
+            //set the dtype based on the Brain dtype
+            layer = layer.dtype(dtype);
             layer = layer.input(layer_input_iter.clone());
             layer = layer.input_size(input_size);
             //TODO: refactor this
@@ -306,6 +311,7 @@ impl<'a> Brain<'a> {
             scope,
             session: session,
             session_options: options,
+            dtype,
             net_layers,
             net_vars,
             Input,
@@ -359,7 +365,8 @@ impl<'a> Brain<'a> {
                     def.add_input_info(
                         REGRESS_INPUTS.to_string(),
                         TensorInfo::new(
-                            DataType::Float,
+                            //DataType::Float,
+                            self.dtype,
                             Shape::from(None),
                             OutputName {
                                 name: self.Input.name()?,
@@ -370,7 +377,8 @@ impl<'a> Brain<'a> {
                     def.add_input_info(
                         "label".to_string(),
                         TensorInfo::new(
-                            DataType::Float,
+                            //DataType::Float,
+                            self.dtype,
                             Shape::from(None),
                             OutputName {
                                 name: self.Label.name()?,
@@ -384,7 +392,8 @@ impl<'a> Brain<'a> {
                     def.add_input_info(
                         "error".to_string(),
                         TensorInfo::new(
-                            DataType::Float,
+                            //DataType::Float,
+                            self.dtype,
                             Shape::from(None),
                             OutputName {
                                 name: self.Error.name()?,
@@ -395,7 +404,8 @@ impl<'a> Brain<'a> {
                     def.add_input_info(
                         "minimize".to_string(),
                         TensorInfo::new(
-                            DataType::Float,
+                            //DataType::Float,
+                            self.dtype,
                             Shape::from(None),
                             OutputName {
                                 name: self.minimize.name()?,
@@ -464,7 +474,7 @@ impl<'a> Brain<'a> {
         &mut self,
         inputs: &Vec<Vec<T>>,
         labels: &Vec<Vec<T>>,
-    ) -> Result<Vec<Tensor<f32>>, Box<dyn Error>> {
+    ) -> Result<Vec<Tensor<T>>, Box<dyn Error>> {
         //TODO: do we lose variable state each session?
         //TODO: k-folding extension method
         assert_eq!(inputs.len(), labels.len());
@@ -520,7 +530,7 @@ impl<'a> Brain<'a> {
             run_args.add_feed(&self.Label, 0, &label_tensor);
             self.session.run(&mut run_args)?;
 
-            let res: Tensor<f32> = run_args.fetch(error)?;
+            let res: Tensor<T> = run_args.fetch(error)?;
             let output: Tensor<T> = run_args.fetch(output)?;
             //TODO: instead of logging these should be accessible within a local class buffer
             //Vec<TrainOutput> or [TrainOutput; configured_recency_buffer_size]
@@ -608,9 +618,9 @@ mod tests {
         let mut scope = Scope::new_root_scope();
         let network = vec![
             //layers::std_layer::new(2, activations::Tanh(10)),
-            layers::std_layer::new(100, activations::Tanh(10), DataType::Float),
-            layers::std_layer::new(100, activations::Tanh(10), DataType::Float),
-            layers::std_layer::new(1, activations::Sigmoid(100), DataType::Float),
+            layers::std_layer::new(100, activations::Tanh()),
+            layers::std_layer::new(100, activations::Tanh()),
+            layers::std_layer::new(1, activations::Sigmoid()),
         ];
 
         let mut Net = Brain::new(
@@ -654,33 +664,28 @@ mod tests {
         let mut Net = Brain()
             .name("test-builder")
             .num_inputs(2)
-            .input_type(DataType::Float)
-            //TODO: input_type(DataType::Float)
+            //TODO: it would be nice if there was compile time warning if the target device ISA
+            //      doesnt support the given type (also for tf_ops)
+            .dtype(DataType::Half)
+            .add_layer(layers::std_layer::new(20, activations::Relu()))
             .add_layer(layers::std_layer::new(
                 20,
-                activations::Sigmoid(1),
-                DataType::Float,
+                activations::Relu(),
+                //use brain float
             ))
-            .add_layer(layers::std_layer::new(
-                20,
-                activations::Sigmoid(1),
-                DataType::Float,
-            ))
-            .add_layer(layers::std_layer::new(
-                1,
-                activations::Sigmoid(1),
-                DataType::Float,
-            ))
+            .add_layer(layers::std_layer::new(1, activations::Relu()))
             //TODO: there should be a helper function for this, we may create
             //our own wrapper trait here if its better than a trait in tensorflow-rs
-            //.optimizer(Box::new(GradientDescentOptimizer::new(
-            //    ops::constant(0.001 as f32, &mut scope).unwrap(),
-            //)))
-            .optimizer(Box::new({
-                let mut res = AdadeltaOptimizer::new();
-                res.set_learning_rate(ops::constant(1.0 as f32, &mut scope).unwrap());
-                res
-            }))
+            .optimizer(Box::new(GradientDescentOptimizer::new(
+                ops::constant(half::f16::from_f32(0.001 as f32), &mut scope).unwrap(),
+            )))
+            //.optimizer(Box::new({
+            //    let mut res = AdadeltaOptimizer::new();
+            //    res.set_learning_rate(ops::constant(half::f16::from_f32(1.0), &mut scope).unwrap());
+            //    res.set_rho(ops::constant(half::f16::from_f32(0.9), &mut scope).unwrap());
+            //    res.set_epsilon(ops::constant(half::f16::from_f32(1e-8), &mut scope).unwrap());
+            //    res
+            //}))
             .build(&mut scope)
             .unwrap();
 
@@ -694,6 +699,16 @@ mod tests {
                 // instead of the above, generate either 0 or 1 and cast to f32
                 let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
                 let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
+                //cast input and outputs to bf16
+                let input = input
+                    .into_iter()
+                    .map(|x| half::f16::from_f32(x))
+                    .collect::<Vec<_>>();
+                let output = output
+                    .into_iter()
+                    .map(|x| half::f16::from_f32(x))
+                    .collect::<Vec<_>>();
+
                 inputs.push(input);
                 outputs.push(output);
             }
@@ -701,10 +716,12 @@ mod tests {
             let res = Net.train(&inputs, &outputs).unwrap();
         }
         //print the output of the network
-        let mut input: Vec<Vec<f32>> = vec![vec![0.0, 1.0]];
-        input.push(vec![1.0, 0.0]);
-        input.push(vec![0.0, 0.0]);
-        input.push(vec![1.0, 1.0]);
+        let mut input: Vec<Vec<half::f16>> = vec![
+            vec![half::f16::from_f32(0.0), half::f16::from_f32(1.0)],
+            vec![half::f16::from_f32(1.0), half::f16::from_f32(0.0)],
+            vec![half::f16::from_f32(0.0), half::f16::from_f32(0.0)],
+            vec![half::f16::from_f32(1.0), half::f16::from_f32(1.0)],
+        ];
 
         let output = Net.infer(&input).unwrap();
         println!(

@@ -88,18 +88,18 @@ pub trait InitializeLayer {
 }
 
 pub trait ConfigureLayer {
-    fn config(self, width: u64, activation: Activation, dtype: DataType) -> Self;
+    fn config(self, width: u64, activation: Activation) -> Self;
 }
 impl<T> ConfigureLayer for T
 where
     T: ConfigurableLayer,
 {
-    fn config(mut self, width: u64, activation: Activation, dtype: DataType) -> T {
-        self.width(width).activation(Some(activation)).dtype(dtype)
+    fn config(mut self, width: u64, activation: Activation) -> T {
+        self.width(width).activation(Some(activation))
     }
 }
 pub trait build_layer {
-    fn new(width: u64, activation: Activation, dtype: DataType) -> Self
+    fn new(width: u64, activation: Activation) -> Self
     where
         Self: Sized;
 }
@@ -107,8 +107,8 @@ impl<T> build_layer for T
 where
     T: ConfigurableLayer + InitializeLayer,
 {
-    fn new(width: u64, activation: Activation, dtype: DataType) -> Self {
-        Self::init().config(width, activation, dtype)
+    fn new(width: u64, activation: Activation) -> Self {
+        Self::init().config(width, activation)
     }
 }
 
@@ -260,7 +260,7 @@ impl BuildLayer for std_layer {
         //let input = self.0.input.clone().unwrap(); //TODO: propagate this with the weird status
         let input = self.get_input().clone().unwrap();
         //let dtype = self.0.dtype;
-        let dtype = self.get_layer_state().dtype;
+        let dtype = self.get_dtype();
         let mut scope = scope.new_sub_scope("layer"); //TODO: layer counter or some uuid
         let scope = &mut scope;
         let w_shape = ops::constant(&[input_size as i64, output_size as i64][..], scope)?;
@@ -287,14 +287,16 @@ impl BuildLayer for std_layer {
                 //otherwise we will miss correlated signals by default
                 //with RandomStandardNormal, albeit with a little longer
                 //trainning time.
-                ops::constant(
-                    Tensor::new(&[1u64, output_size as u64])
-                        .with_values(&vec![0.0f32; output_size as usize][..])?,
+                ops::Cast::new().SrcT(DataType::Float).DstT(dtype).build(
+                    ops::constant(
+                        Tensor::new(&[1u64, output_size as u64])
+                            .with_values(&vec![0.0f32; output_size as usize][..])?,
+                        scope,
+                    )?,
                     scope,
-                )?,
-                // ops::RandomStandardNormal::new()
-                //     .dtype(DataType::Float)
-                //     .build(ops::constant(&[1i64,output_size as i64][..], scope)?, scope)?,
+                )?, // ops::RandomStandardNormal::new()
+                    //     .dtype(DataType::Float)
+                    //     .build(ops::constant(&[1i64,output_size as i64][..], scope)?, scope)?,
             )
             //.data_type(DataType::Float)
             .data_type(dtype)
