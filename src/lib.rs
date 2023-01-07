@@ -82,7 +82,7 @@ use layers::*;
 //extern crate derive_builder;
 extern crate tensorflow;
 
-pub struct BrainBuilder<'a, Layer: BuildLayer + LayerAccessor + ConfigurableLayer> {
+pub struct BrainBuilder<'a, Layer: BuildLayer + LayerAccessor + ConfigureLayer> {
     name: &'a str,
     num_inputs: u64,
     dtype: DataType,
@@ -94,7 +94,7 @@ pub struct BrainBuilder<'a, Layer: BuildLayer + LayerAccessor + ConfigurableLaye
 ///Constructor to initialize the BrainBuilder
 pub fn Brain<'a, Layer>() -> BrainBuilder<'a, Layer>
 where
-    Layer: BuildLayer + LayerAccessor + ConfigurableLayer,
+    Layer: BuildLayer + LayerAccessor + ConfigureLayer,
 {
     BrainBuilder {
         name: "Brain",
@@ -107,7 +107,7 @@ where
 //TODO: a trait or some way to do std_layer instead of add_layer(std_layer)
 impl<'a, Layer> BrainBuilder<'a, Layer>
 where
-    Layer: BuildLayer + LayerAccessor + ConfigurableLayer,
+    Layer: BuildLayer + LayerAccessor + ConfigureLayer,
     //Opt: Optimizer,
 {
     pub fn add_layer(mut self, layer: Layer) -> Self {
@@ -192,7 +192,7 @@ pub struct Brain<'a> {
 impl<'a> Brain<'a> {
     //TODO: type safety: use trait bounds to allow for using bigints etc for counting//indexing
     //      types.
-    pub fn new<Layer: BuildLayer + LayerAccessor + ConfigurableLayer>(
+    pub fn new<Layer: BuildLayer + LayerAccessor + ConfigureLayer>(
         name: String,
         //TODO: a vec of layers here will suffice for now, but this will be a builder pattern as
         //soon as possible

@@ -65,13 +65,10 @@ pub trait LayerAccessor {
     fn get_width(&self) -> &u64;
     fn get_activation(&self) -> &Option<Activation>;
     fn get_dtype(&self) -> DataType;
-    //TODO: technically we need get_activation to complete the pattern
-    //fn get_activation(self) -> Option<Box<dyn Activation>>;
 }
-//TODO: get rid of  since or reimplement method chaining
 ///A trait that defines the standard layer parameters via getters
 ///and setters that can mutably configure layers, used by internal network builder.
-pub trait ConfigurableLayer {
+pub trait ConfigureLayer {
     fn input(self, input: Operation) -> Self;
     fn input_size(self, input_size: u64) -> Self;
     fn output_size(self, output_size: u64) -> Self;
@@ -86,18 +83,7 @@ pub trait InitializeLayer {
     where
         Self: Sized;
 }
-
-pub trait ConfigureLayer {
-    fn config(self, width: u64, activation: Activation) -> Self;
-}
-impl<T> ConfigureLayer for T
-where
-    T: ConfigurableLayer,
-{
-    fn config(mut self, width: u64, activation: Activation) -> T {
-        self.width(width).activation(Some(activation))
-    }
-}
+///Set all user defined parameters for a layer.
 pub trait build_layer {
     fn new(width: u64, activation: Activation) -> Self
     where
@@ -105,10 +91,10 @@ pub trait build_layer {
 }
 impl<T> build_layer for T
 where
-    T: ConfigurableLayer + InitializeLayer,
+    T: InitializeLayer + ConfigureLayer,
 {
     fn new(width: u64, activation: Activation) -> Self {
-        Self::init().config(width, activation)
+        Self::init().width(width).activation(Some(activation))
     }
 }
 
@@ -125,19 +111,7 @@ pub struct LayerState {
     activation: Option<Activation>,
     dtype: DataType,
 }
-impl InitializeLayer for LayerState {
-    fn init() -> Self {
-        LayerState {
-            input: None,
-            input_size: 0,
-            output_size: 0,
-            width: 0,
-            activation: None,
-            dtype: DataType::Float,
-        }
-    }
-}
-impl ConfigurableLayer for LayerState {
+impl ConfigureLayer for LayerState {
     fn input(mut self, input: Operation) -> Self {
         self.input = Some(input);
         self
@@ -163,6 +137,38 @@ impl ConfigurableLayer for LayerState {
         self
     }
 }
+impl LayerAccessor for LayerState {
+    fn get_input(&self) -> &Option<Operation> {
+        &self.input
+    }
+    fn get_input_size(&self) -> &u64 {
+        &self.input_size
+    }
+    fn get_output_size(&self) -> &u64 {
+        &self.output_size
+    }
+    fn get_width(&self) -> &u64 {
+        &self.width
+    }
+    fn get_activation(&self) -> &Option<Activation> {
+        &self.activation
+    }
+    fn get_dtype(&self) -> DataType {
+        self.dtype
+    }
+}
+impl InitializeLayer for LayerState {
+    fn init() -> Self {
+        LayerState {
+            input: None,
+            input_size: 0,
+            output_size: 0,
+            width: 0,
+            activation: None,
+            dtype: DataType::Float,
+        }
+    }
+}
 ///A layer that has been added to a graph with its Output and backing
 ///Operation ready to be assigned and trainnable variables exposed.
 pub struct TrainnableLayer {
@@ -179,7 +185,8 @@ pub trait InheritState {
     fn get_mut_layer_state(&mut self) -> &mut LayerState;
     fn get_layer_state(&self) -> &LayerState;
 }
-impl<L> ConfigurableLayer for L
+///blanket for optional inherited layer state
+impl<L> ConfigureLayer for L
 where
     L: InheritState,
 {
@@ -208,7 +215,6 @@ where
         self
     }
 }
-//TODO: should this also include Activation and dtype?
 impl<L> LayerAccessor for L
 where
     L: InheritState,
@@ -250,8 +256,6 @@ impl InheritState for std_layer {
 }
 impl BuildLayer for std_layer {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
-        //TODO: regex this inline
-        //let input_size = self.0.input_size;
         //instead use the accessor
         let input_size = *self.get_input_size();
         //let output_size = self.0.output_size;
@@ -304,7 +308,7 @@ impl BuildLayer for std_layer {
             .build(&mut scope.with_op_name("b"))?;
 
         //n is input_size to be divided at each node in order to normalize the signals at each node before activation
-        let act = (self.0.activation.as_ref().unwrap().function)(
+        let act = (self.get_activation().as_ref().unwrap().function)(
             ops::add(
                 ops::mat_mul(input.clone(), w.output().clone(), scope)?,
                 b.output().clone(),
@@ -322,7 +326,7 @@ impl BuildLayer for std_layer {
         })
     }
 }
-
+//TODO: this should be solved also with the derive macro for InheritState
 impl InitializeLayer for std_layer {
     fn init() -> Self {
         std_layer(LayerState {
