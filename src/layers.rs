@@ -4,6 +4,9 @@
 //this includes but is not limited to: convolution, residual connections (how the network layers are connected),
 //bias operations, recurrent connections, variant and invariant scaling, etc. if it isnt an activation function
 //it should be defined here.
+//there is only the sequential layer builder, any parallel stuff must be built using concat and
+//split type operations or noop type layers where towers may have different length.
+//this is for simplicity of the framework and may be extended on in the future.
 use half::f16;
 use tensorflow::ops;
 use tensorflow::ops::TensorArrayV3;
@@ -57,12 +60,11 @@ pub trait BuildLayer {
     ///Build and insert the layer configuration into the tensorflow graph
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status>;
 }
-pub trait LayerAccessor {
+pub trait AccessLayer {
     fn get_input(&self) -> &Option<Operation>;
-    //Copy return types can be pass by reference
-    fn get_input_size(&self) -> &u64;
-    fn get_output_size(&self) -> &u64;
-    fn get_width(&self) -> &u64;
+    fn get_input_size(&self) -> u64;
+    fn get_output_size(&self) -> u64;
+    fn get_width(&self) -> u64;
     fn get_activation(&self) -> &Option<Activation>;
     fn get_dtype(&self) -> DataType;
 }
@@ -137,18 +139,18 @@ impl ConfigureLayer for LayerState {
         self
     }
 }
-impl LayerAccessor for LayerState {
+impl AccessLayer for LayerState {
     fn get_input(&self) -> &Option<Operation> {
         &self.input
     }
-    fn get_input_size(&self) -> &u64 {
-        &self.input_size
+    fn get_input_size(&self) -> u64 {
+        self.input_size
     }
-    fn get_output_size(&self) -> &u64 {
-        &self.output_size
+    fn get_output_size(&self) -> u64 {
+        self.output_size
     }
-    fn get_width(&self) -> &u64 {
-        &self.width
+    fn get_width(&self) -> u64 {
+        self.width
     }
     fn get_activation(&self) -> &Option<Activation> {
         &self.activation
@@ -215,21 +217,21 @@ where
         self
     }
 }
-impl<L> LayerAccessor for L
+impl<L> AccessLayer for L
 where
     L: InheritState,
 {
     fn get_input(&self) -> &Option<Operation> {
         &self.get_layer_state().input
     }
-    fn get_input_size(&self) -> &u64 {
-        &self.get_layer_state().input_size
+    fn get_input_size(&self) -> u64 {
+        self.get_layer_state().input_size
     }
-    fn get_output_size(&self) -> &u64 {
-        &self.get_layer_state().output_size
+    fn get_output_size(&self) -> u64 {
+        self.get_layer_state().output_size
     }
-    fn get_width(&self) -> &u64 {
-        &self.get_layer_state().width
+    fn get_width(&self) -> u64 {
+        self.get_layer_state().width
     }
     fn get_activation(&self) -> &Option<Activation> {
         &self.get_layer_state().activation
@@ -257,9 +259,9 @@ impl InheritState for std_layer {
 impl BuildLayer for std_layer {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
         //instead use the accessor
-        let input_size = *self.get_input_size();
+        let input_size = self.get_input_size();
         //let output_size = self.0.output_size;
-        let output_size = *self.get_output_size();
+        let output_size = self.get_output_size();
         //tensorflow status
         //let input = self.0.input.clone().unwrap(); //TODO: propagate this with the weird status
         let input = self.get_input().clone().unwrap();
@@ -308,7 +310,7 @@ impl BuildLayer for std_layer {
             .build(&mut scope.with_op_name("b"))?;
 
         //n is input_size to be divided at each node in order to normalize the signals at each node before activation
-        let act = (self.get_activation().as_ref().unwrap().function)(
+        let act = (self.get_activation().as_ref().unwrap())(
             ops::add(
                 ops::mat_mul(input.clone(), w.output().clone(), scope)?,
                 b.output().clone(),
@@ -339,11 +341,6 @@ impl InitializeLayer for std_layer {
         })
     }
 }
-//impl Clone for std_layer {
-//    fn clone(&self) -> Self {
-//        std_layer(self.0.clone())
-//    }
-//}
 //TODO: fix lazy builder
 //pub fn std() -> Vec<Box<std_layer>> {
 //    vec![Box::new(std_layer::init())]

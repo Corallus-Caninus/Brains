@@ -15,7 +15,9 @@
 
 mod activations;
 mod layers;
+mod optimizer;
 use anyhow::Context;
+use optimizer::LossFunction;
 //use half::bf16;
 //use half::f16;
 use log;
@@ -34,6 +36,7 @@ use std::result::Result;
 //TODO: clean this up with proper heirachy
 use rand::Rng;
 // include par_iter from rayon
+use layers::*;
 use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -68,46 +71,34 @@ use tensorflow::REGRESS_INPUTS;
 use tensorflow::REGRESS_METHOD_NAME;
 use tensorflow::REGRESS_OUTPUTS;
 use uuid::Uuid;
-//function types
-//@DEPRECATED, we are removing function types in favor of trait bounds
-//use layers::Layer;
-use layers::*;
-//TODO: @DEPRECATED
-//use activations::Activation;
-//pub mod activations;
-//pub mod layers;
-//use activations::*;
-//use anyhow::anyhow;
-//#[macro_use]
-//extern crate derive_builder;
 extern crate tensorflow;
 
-pub struct BrainBuilder<'a, Layer: BuildLayer + LayerAccessor + ConfigureLayer> {
+pub struct BrainBuilder<'a, Layer: BuildLayer + AccessLayer + ConfigureLayer> {
     name: &'a str,
     num_inputs: u64,
     dtype: DataType,
-    //TODO: this is only a trait obj because optimizer isnt clone for method chaining
-    Optimizer: Option<Box<dyn Optimizer>>,
+    Optimizer: Option<optimizer::LossOptimizer>,
+    error: Option<LossFunction>,
     layers: Vec<Layer>,
 }
-//TODO: This causes a temporary value dropped while building
 ///Constructor to initialize the BrainBuilder
 pub fn Brain<'a, Layer>() -> BrainBuilder<'a, Layer>
 where
-    Layer: BuildLayer + LayerAccessor + ConfigureLayer,
+    Layer: BuildLayer + AccessLayer + ConfigureLayer,
 {
     BrainBuilder {
         name: "Brain",
         num_inputs: 0,
         dtype: DataType::Float,
         Optimizer: None,
+        error: None,
         layers: Vec::new(),
     }
 }
-//TODO: a trait or some way to do std_layer instead of add_layer(std_layer)
+//TODO: a trait or some way to do std_layer instead of std_layer::new() (maybe)
 impl<'a, Layer> BrainBuilder<'a, Layer>
 where
-    Layer: BuildLayer + LayerAccessor + ConfigureLayer,
+    Layer: BuildLayer + AccessLayer + ConfigureLayer,
     //Opt: Optimizer,
 {
     pub fn add_layer(mut self, layer: Layer) -> Self {
@@ -126,8 +117,12 @@ where
         self.dtype = dtype;
         self
     }
-    pub fn optimizer(mut self, optimizer: Box<dyn Optimizer>) -> Self {
+    pub fn optimizer(mut self, optimizer: optimizer::LossOptimizer) -> Self {
         self.Optimizer = Some(optimizer);
+        self
+    }
+    pub fn error(mut self, error: LossFunction) -> Self {
+        self.error = Some(error);
         self
     }
     pub fn build(mut self, scope: &mut Scope) -> Result<Brain, Status> {
@@ -138,28 +133,15 @@ where
         }
         layers.reverse();
 
-        //TODO: default condition for optimizer is verbose because tensorflow-rs
-        //doesnt use a trait for constructing optimizers (yet).
-        if self.Optimizer.is_none() {
-            let sgd = GradientDescentOptimizer::new(ops::constant(0.01 as f32, scope)?);
-            return Brain::new(
-                self.name.to_string(),
-                layers,
-                Some(Box::new(sgd)),
-                self.num_inputs,
-                self.dtype,
-                scope,
-            );
-        } else {
-            return Brain::new(
-                self.name.to_string(),
-                layers,
-                self.Optimizer,
-                self.num_inputs,
-                self.dtype,
-                scope,
-            );
-        }
+        return Brain::new(
+            self.name.to_string(),
+            layers,
+            self.Optimizer,
+            self.error,
+            self.num_inputs,
+            self.dtype,
+            scope,
+        );
     }
 }
 
@@ -169,17 +151,18 @@ pub struct Brain<'a> {
     scope: &'a mut Scope,
     session: Session,
     session_options: SessionOptions,
-    ///the DataType for the network operations
+    ///The error function for the optimizer
+    error: Operation,
+    ///The DataType for the network operations
     dtype: DataType,
-    ///each layers output for the network
+    ///Each layers output for the network
     net_layers: Vec<Output>,
-    ///all the trainable parameters of the network
+    ///All the trainable parameters of the network
     net_vars: Vec<Variable>,
     ///Operation hooks to interact with the graph (kept here for serialization)
     Input: Operation,
     Label: Operation,
     Output_op: Operation,
-    Error: Operation,
     ///variables to be minimized
     minimize_vars: Vec<Variable>,
     ///regression operation
@@ -192,19 +175,21 @@ pub struct Brain<'a> {
 impl<'a> Brain<'a> {
     //TODO: type safety: use trait bounds to allow for using bigints etc for counting//indexing
     //      types.
-    pub fn new<Layer: BuildLayer + LayerAccessor + ConfigureLayer>(
+    pub fn new<Layer: BuildLayer + AccessLayer + ConfigureLayer>(
         name: String,
         //TODO: a vec of layers here will suffice for now, but this will be a builder pattern as
         //soon as possible
         layers: Vec<Layer>,
         //TODO: optimizer,
-        optimizer: Option<Box<dyn Optimizer>>,
+        optimizer: Option<optimizer::LossOptimizer>,
+        error: Option<LossFunction>,
         num_inputs: u64,
         dtype: DataType,
         scope: &mut Scope,
     ) -> Result<Brain, Status> {
         //propagate an error if optimizer is none
         let optimizer = optimizer.unwrap();
+        let error = error.unwrap();
 
         let mut scope = scope;
 
@@ -220,7 +205,7 @@ impl<'a> Brain<'a> {
         let Label = ops::Placeholder::new()
             //.dtype(DataType::Float)
             .dtype(dtype)
-            .shape([1u64, *layers[layers.len() - 1].get_width()])
+            .shape([1u64, layers[layers.len() - 1].get_width()])
             .build(&mut scope.with_op_name("label"))?;
 
         //CONSTRUCT NETWORK
@@ -242,9 +227,9 @@ impl<'a> Brain<'a> {
             layer = layer.input(layer_input_iter.clone());
             layer = layer.input_size(input_size);
             //TODO: refactor this
-            input_size = *layer.get_width();
-            output_size = &input_size;
-            layer = layer.output_size(*output_size);
+            input_size = layer.get_width();
+            output_size = input_size;
+            layer = layer.output_size(output_size);
             //TODO: end of extraction routine
 
             let parameters = layer.build_layer(&mut scope)?;
@@ -269,28 +254,11 @@ impl<'a> Brain<'a> {
         //let mut optimizer = AdadeltaOptimizer::new();
         //TODO: extract this default to Builder
 
-        // let mut optimizer =
-        //     GradientDescentOptimizer::new(ops::constant(learning_rate, &mut scope)?);
-
-        // DEFINE ERROR FUNCTION //
-        // TODO: pass this in and offer some default helper functions within the framework
-        //default error is distance, we should expose this for cross entropy etc
-        let Error = ops::square(
-            ops::abs(
-                ops::sub(
-                    Output.clone(),
-                    Label.clone(),
-                    &mut scope.with_op_name("error"),
-                )?,
-                &mut scope,
-            )?,
-            &mut scope,
-        )?;
-
+        let error = error(scope, &Output, &Label)?;
         let (minimize_vars, minimize) = optimizer
             .minimize(
                 &mut scope,
-                Error.clone().into(),
+                error.clone().into(),
                 MinimizeOptions::default().with_variables(&net_vars),
             )?
             .into();
@@ -309,7 +277,7 @@ impl<'a> Brain<'a> {
         let mut init_brain = Brain {
             name,
             scope,
-            session: session,
+            session,
             session_options: options,
             dtype,
             net_layers,
@@ -317,7 +285,7 @@ impl<'a> Brain<'a> {
             Input,
             Label,
             Output_op,
-            Error,
+            error,
             minimize_vars,
             minimize,
             SavedModelSaver,
@@ -396,7 +364,7 @@ impl<'a> Brain<'a> {
                             self.dtype,
                             Shape::from(None),
                             OutputName {
-                                name: self.Error.name()?,
+                                name: self.error.name()?,
                                 index: 0,
                             },
                         ),
@@ -450,7 +418,7 @@ impl<'a> Brain<'a> {
             graph.operation_by_name_required(&signature.get_input("inputs")?.name().name)?;
         self.Label =
             graph.operation_by_name_required(&signature.get_input("label")?.name().name)?;
-        self.Error =
+        self.error =
             graph.operation_by_name_required(&signature.get_input("error")?.name().name)?;
         self.minimize =
             graph.operation_by_name_required(&signature.get_input("minimize")?.name().name)?;
@@ -524,7 +492,7 @@ impl<'a> Brain<'a> {
             let mut run_args = SessionRunArgs::new();
             run_args.add_target(&self.minimize);
 
-            let error = run_args.request_fetch(&self.Error, 0);
+            let error = run_args.request_fetch(&self.error, 0);
             let output = run_args.request_fetch(&self.Output_op, 0);
             run_args.add_feed(&self.Input, 0, &input_tensor);
             run_args.add_feed(&self.Label, 0, &label_tensor);
@@ -616,25 +584,22 @@ mod tests {
     #[test]
     fn test_initial() {
         let mut scope = Scope::new_root_scope();
-        let network = vec![
-            //layers::std_layer::new(2, activations::Tanh(10)),
-            layers::std_layer::new(100, activations::Tanh()),
-            layers::std_layer::new(100, activations::Tanh()),
-            layers::std_layer::new(1, activations::Sigmoid()),
-        ];
-
-        let mut Net = Brain::new(
-            "test-initial".to_string(),
-            network,
-            //TODO: this is recklessly verbose
-            Some(Box::new(GradientDescentOptimizer::new(
-                ops::constant(0.1 as f32, &mut scope).unwrap(),
-            ))),
-            2,
-            DataType::Float,
-            &mut scope,
-        )
-        .unwrap();
+        let opt = optimizer::GradientDescent()
+            .learning_rate(0.01 as f32)
+            .dtype(DataType::Float)
+            .build(&mut scope)
+            .unwrap();
+        let mut Net = Brain()
+            .name("test-builder")
+            .num_inputs(2)
+            .add_layer(layers::std_layer::new(20, activations::Relu()))
+            .add_layer(layers::std_layer::new(20, activations::Relu()))
+            .add_layer(layers::std_layer::new(1, activations::Relu()))
+            .dtype(DataType::Float)
+            .optimizer(opt)
+            .error(optimizer::l2())
+            .build(&mut scope)
+            .unwrap();
 
         //train the network
         let mut rrng = rand::thread_rng();
@@ -661,41 +626,39 @@ mod tests {
     #[test]
     fn test_builder() {
         let mut scope = Scope::new_root_scope();
+        let opt = optimizer::Adadelta()
+            .learning_rate(half::f16::from_f32(0.1))
+            .rho(half::f16::from_f32(0.95))
+            .epsilon(half::f16::from_f32(1e-6))
+            .dtype(DataType::Half)
+            .build(&mut scope)
+            .unwrap();
+        //        let opt = optimizer::GradientDescent()
+        //            .learning_rate(half::f16::from_f32(0.01))
+        //            .dtype(DataType::Half)
+        //            .build(&mut scope)
+        //            .unwrap();
         let mut Net = Brain()
             .name("test-builder")
             .num_inputs(2)
             //TODO: it would be nice if there was compile time warning if the target device ISA
             //      doesnt support the given type (also for tf_ops)
+            .add_layer(layers::std_layer::new(20, activations::Elu()))
+            .add_layer(layers::std_layer::new(20, activations::Elu()))
+            .add_layer(layers::std_layer::new(1, activations::Tanh()))
             .dtype(DataType::Half)
-            .add_layer(layers::std_layer::new(20, activations::Relu()))
-            .add_layer(layers::std_layer::new(
-                20,
-                activations::Relu(),
-                //use brain float
-            ))
-            .add_layer(layers::std_layer::new(1, activations::Relu()))
-            //TODO: there should be a helper function for this, we may create
-            //our own wrapper trait here if its better than a trait in tensorflow-rs
-            .optimizer(Box::new(GradientDescentOptimizer::new(
-                ops::constant(half::f16::from_f32(0.001 as f32), &mut scope).unwrap(),
-            )))
-            //.optimizer(Box::new({
-            //    let mut res = AdadeltaOptimizer::new();
-            //    res.set_learning_rate(ops::constant(half::f16::from_f32(1.0), &mut scope).unwrap());
-            //    res.set_rho(ops::constant(half::f16::from_f32(0.9), &mut scope).unwrap());
-            //    res.set_epsilon(ops::constant(half::f16::from_f32(1e-8), &mut scope).unwrap());
-            //    res
-            //}))
+            .optimizer(opt)
+            .error(optimizer::l2())
             .build(&mut scope)
             .unwrap();
 
         //train the network
         let mut rrng = rand::thread_rng();
         // create 100 entries for inputs and outputs of xor
-        for _ in 0..200 {
+        for _ in 0..400 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
-            for _ in 0..200 {
+            for _ in 0..250 {
                 // instead of the above, generate either 0 or 1 and cast to f32
                 let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
                 let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
