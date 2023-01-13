@@ -432,62 +432,67 @@ impl<'a> Brain<'a> {
     ///
     ///**PARAMETERS**:
     ///
-    /// * inputs: the inputs to the network as a flattened 1D vector
+    /// * inputs: the inputs to the network as a collection of flattened 1D vector
     ///
-    /// * labels: the labels for the inputs as a flattened 1D vector
+    /// * labels: the labels for the inputs as a collection of flattened 1D vector
     ///
-    /// NOTE: labels and inputs must align with the network input and output vector.
-    pub fn train<T: tensorflow::TensorType>(
-        // &mut self,
+    pub fn train<'b, T, I, L, const Ilen: usize, const Llen: usize>(
         &mut self,
-        inputs: &Vec<Vec<T>>,
-        labels: &Vec<Vec<T>>,
-    ) -> Result<Vec<Tensor<T>>, Box<dyn Error>> {
+        inputs: I,
+        labels: L,
+    ) -> Result<Vec<Tensor<T>>, Box<dyn Error>>
+    where
+        T: tensorflow::TensorType + Clone,
+        I: IntoIterator<Item = &'b [T; Ilen]>,
+        L: IntoIterator<Item = &'b [T; Llen]>,
+    {
         //TODO: do we lose variable state each session?
         //TODO: k-folding extension method
-        assert_eq!(inputs.len(), labels.len());
         log::debug!("trainning..");
         let mut result = vec![];
+        let mut inputs = inputs.into_iter();
+        let mut labels = labels.into_iter();
 
-        let mut input_tensor: Tensor<T> = Tensor::new(&[1u64, inputs[0].len() as u64]);
-        let mut label_tensor: Tensor<T> = Tensor::new(&[1u64, labels[0].len() as u64]);
+        //get the length of each slice in input
+        let first_input = inputs.next().unwrap();
+        let first_label = labels.next().unwrap();
+        let input_len = first_input.len();
+        let label_len = first_label.len();
 
-        log::debug!("inputs.len(): {}", inputs.len());
-        log::debug!("{}", inputs[0].len());
-        log::debug!("{}", labels[0].len());
+        let mut input_tensors: Vec<Tensor<T>> = inputs
+            .into_iter()
+            .map(|input| {
+                Tensor::new(&[1u64, input_len as u64])
+                    .with_values(input)
+                    //TODO: propagate this
+                    .unwrap()
+            })
+            .collect();
+        //add the first input back to the front of the vector
+        input_tensors.insert(
+            0,
+            Tensor::new(&[1u64, input_len as u64]).with_values(first_input)?,
+        );
+        let mut label_tensors: Vec<Tensor<T>> = labels
+            .into_iter()
+            .map(|label| {
+                Tensor::new(&[1u64, label_len as u64])
+                    .with_values(label)
+                    .unwrap()
+            })
+            .collect();
+        label_tensors.insert(
+            0,
+            Tensor::new(&[1u64, label_len as u64]).with_values(first_label)?,
+        );
+        log::debug!("input_tensors.len(): {}", input_tensors.len());
+        log::debug!("label_tensors.len(): {}", label_tensors.len());
 
-        let mut input_iter = inputs.into_iter();
-        let mut label_iter = labels.into_iter();
-
-        let mut i = 0;
+        let batch_size = input_tensors.len();
         let mut avg_t = vec![];
-        //TODO: dont loop this send it all to the VRAM and unroll the n-1 dimensional input tensor,
-        //its up to the architect to ensure this fits in memory
-        //unroll op occurs in graph declaration (Brain constructor).
-        //this just makes a +1 Rank
-        //tensor from Vec<Vec<T>>, runs session and creates a Vec<Vec<T>> from the output
-        loop {
+        for (input_tensor, label_tensor) in input_tensors.iter_mut().zip(label_tensors.iter_mut()) {
             // start a timer
             let start = Instant::now();
-
-            i += 1;
-            let input = input_iter.next();
-            let label = label_iter.next();
-            if input.is_none() || label.is_none() {
-                break;
-            }
-            let input = input.unwrap();
-            let label = label.unwrap();
-            // now get input and label as slices
-            let input = input.as_slice();
-            let label = label.as_slice();
-            // now assign the input and label to the tensor
-            for i in 0..input.len() {
-                input_tensor[i] = input[i].clone();
-            }
-            for i in 0..label.len() {
-                label_tensor[i] = label[i].clone();
-            }
 
             let mut run_args = SessionRunArgs::new();
             run_args.add_target(&self.minimize);
@@ -512,9 +517,9 @@ impl<'a> Brain<'a> {
 
             log::info!(
                 "training on {}\n input: {:?} label: {:?} error: {} output: {} seconds/epoch: {:?}",
-                i,
-                input,
-                label,
+                batch_size,
+                input_tensor,
+                label_tensor,
                 res,
                 output,
                 average
@@ -531,37 +536,79 @@ impl<'a> Brain<'a> {
     //TODO: search iterations should see different datasets/epochs of dataset (not actual epoch backprop) via k-folding
     //      also cross validate the k-fold
 
-    pub fn infer<T: tensorflow::TensorType>(
-        &self,
-        inputs: &Vec<Vec<T>>,
-    ) -> Result<Vec<Tensor<T>>, Box<dyn Error>> {
+    ///Infer a given batch of inputs, returning the ordered outputs as a vector. This does not
+    ///update the parameters or perform backpropagation.
+    pub fn infer<'b, T, I, const Ilen: usize>(
+        &mut self,
+        inputs: I,
+    ) -> Result<Vec<Tensor<T>>, Box<dyn Error>>
+    where
+        T: tensorflow::TensorType + Clone,
+        I: IntoIterator<Item = &'b [T; Ilen]>,
+    {
+        log::debug!("infering..");
         let mut result = vec![];
-        let mut input_tensor: Tensor<T> = Tensor::new(&[1u64, inputs[0].len() as u64]);
-        let mut input_iter = inputs.into_iter();
-        let mut i = 0;
-        loop {
-            i += 1;
-            let input = input_iter.next();
-            if input.is_none() {
-                break;
-            }
-            let input = input.unwrap();
-            // now get input and label as slices
-            let input = input.as_slice();
-            // now assign the input and label to the tensor
-            for i in 0..input.len() {
-                input_tensor[i] = input[i].clone();
-            }
+        let mut inputs = inputs.into_iter();
+
+        //get the length of each slice in input
+        let first_input = inputs.next().unwrap();
+        let input_len = first_input.len();
+
+        let mut input_tensors: Vec<Tensor<T>> = inputs
+            .into_iter()
+            .map(|input| {
+                Tensor::new(&[1u64, input_len as u64])
+                    .with_values(input)
+                    .unwrap()
+            })
+            .collect();
+        //add the first input back to the front of the vector
+        input_tensors.insert(
+            0,
+            Tensor::new(&[1u64, input_len as u64]).with_values(first_input)?,
+        );
+        log::debug!("input_tensors.len(): {}", input_tensors.len());
+        for input_tensor in input_tensors.iter_mut() {
             let mut run_args = SessionRunArgs::new();
             let output = run_args.request_fetch(&self.Output_op, 0);
             run_args.add_feed(&self.Input, 0, &input_tensor);
             self.session.run(&mut run_args)?;
             let output: Tensor<T> = run_args.fetch(output)?;
-            log::info!("input: {:?} output: {:?}", input, output);
+            log::info!("input: {:?} output: {}", input_tensor, output);
             result.push(output);
         }
         Ok(result)
     }
+    //        &self,
+    //        inputs: &Vec<Vec<T>>,
+    //    ) -> Result<Vec<Tensor<T>>, Box<dyn Error>> {
+    //        let mut result = vec![];
+    //        let mut input_tensor: Tensor<T> = Tensor::new(&[1u64, inputs[0].len() as u64]);
+    //        let mut input_iter = inputs.into_iter();
+    //        let mut i = 0;
+    //        loop {
+    //            i += 1;
+    //            let input = input_iter.next();
+    //            if input.is_none() {
+    //                break;
+    //            }
+    //            let input = input.unwrap();
+    //            // now get input and label as slices
+    //            let input = input.as_slice();
+    //            // now assign the input and label to the tensor
+    //            for i in 0..input.len() {
+    //                input_tensor[i] = input[i].clone();
+    //            }
+    //            let mut run_args = SessionRunArgs::new();
+    //            let output = run_args.request_fetch(&self.Output_op, 0);
+    //            run_args.add_feed(&self.Input, 0, &input_tensor);
+    //            self.session.run(&mut run_args)?;
+    //            let output: Tensor<T> = run_args.fetch(output)?;
+    //            log::info!("input: {:?} output: {:?}", input, output);
+    //            result.push(output);
+    //        }
+    //        Ok(result)
+    //    }
 }
 
 //TODO: serialize any data outside of the graph, currently this isnt necessary and ideally we
@@ -609,8 +656,8 @@ mod tests {
             let mut outputs = Vec::new();
             for _ in 0..10 {
                 // instead of the above, generate either 0 or 1 and cast to f32
-                let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
-                let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
+                let input = [(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
+                let output = [(input[0] as u8 ^ input[1] as u8) as f32];
                 inputs.push(input);
                 outputs.push(output);
             }
@@ -658,19 +705,20 @@ mod tests {
         for _ in 0..400 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
+            let mut input_one = half::f16::from_f32(1.0);
+            let mut input_two = half::f16::from_f32(0.0);
+            let mut output_cast = half::f16::from_f32(1.0);
             for _ in 0..250 {
                 // instead of the above, generate either 0 or 1 and cast to f32
-                let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
-                let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
+                let input_one = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                let input_two = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                let input = [input_one, input_two];
+                output_cast = half::f16::from_f32(
+                    ((input[0].to_f32()) as u8 ^ input[1].to_f32() as u8) as f32,
+                )
+                .clone();
+                let output = [output_cast];
                 //cast input and outputs to bf16
-                let input = input
-                    .into_iter()
-                    .map(|x| half::f16::from_f32(x))
-                    .collect::<Vec<_>>();
-                let output = output
-                    .into_iter()
-                    .map(|x| half::f16::from_f32(x))
-                    .collect::<Vec<_>>();
 
                 inputs.push(input);
                 outputs.push(output);
@@ -679,11 +727,11 @@ mod tests {
             let res = Net.train(&inputs, &outputs).unwrap();
         }
         //print the output of the network
-        let mut input: Vec<Vec<half::f16>> = vec![
-            vec![half::f16::from_f32(0.0), half::f16::from_f32(1.0)],
-            vec![half::f16::from_f32(1.0), half::f16::from_f32(0.0)],
-            vec![half::f16::from_f32(0.0), half::f16::from_f32(0.0)],
-            vec![half::f16::from_f32(1.0), half::f16::from_f32(1.0)],
+        let mut input = vec![
+            [half::f16::from_f32(0.0), half::f16::from_f32(1.0)],
+            [half::f16::from_f32(1.0), half::f16::from_f32(0.0)],
+            [half::f16::from_f32(0.0), half::f16::from_f32(0.0)],
+            [half::f16::from_f32(1.0), half::f16::from_f32(1.0)],
         ];
 
         let output = Net.infer(&input).unwrap();
