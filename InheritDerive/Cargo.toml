@@ -1,0 +1,15 @@
+[package]
+name = "InheritDerive"
+version = "0.1.0"
+edition = "2021"
+
+#this is a lib crate
+[lib]
+#this is a proc-macro crate
+proc-macro = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+quote = "1.0.23"
+syn = "1.0.107"

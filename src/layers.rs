@@ -37,6 +37,7 @@ use tensorflow::Variable;
 use tensorflow::REGRESS_INPUTS;
 use tensorflow::REGRESS_METHOD_NAME;
 use tensorflow::REGRESS_OUTPUTS;
+use InheritDerive::InheritState;
 
 use crate::activations::*;
 
@@ -242,20 +243,13 @@ where
 }
 
 //LAYER DEFINITIONS//
-//each layer must derive InheritState accessor trait,
-//BuildLayer and InitializeLayer
-//
-//BuildLayer is the trait that defines the layers architecture, the rest are setters, getters and
-//defaults.
+//Layers use an optional inheritence pattern for fast blanket implementation generalization.
+//each layer doesnt have to inherit LayerState and derive InheritState but you will likely end up
+//doing this yourself otherwise.
+//NOTE: currently AccessLayer and ConfigureLayer are manditory for integrating into Brains so the
+//optional inheritence pattern is *currently* the standard for extensibility
+#[derive(InheritState)]
 pub struct std_layer(LayerState);
-impl InheritState for std_layer {
-    fn get_mut_layer_state(&mut self) -> &mut LayerState {
-        &mut self.0
-    }
-    fn get_layer_state(&self) -> &LayerState {
-        &self.0
-    }
-}
 impl BuildLayer for std_layer {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
         //instead use the accessor
