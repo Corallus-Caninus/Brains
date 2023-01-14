@@ -73,6 +73,41 @@ use tensorflow::REGRESS_OUTPUTS;
 use uuid::Uuid;
 extern crate tensorflow;
 
+//TODO: fix this:
+//unsafe impl<T> Send for Tensor<T> {}
+//create an extension struct just to derive the above impl:
+pub struct SendableTensor<T>
+where
+    T: tensorflow::TensorType,
+{
+    pub tensor: Tensor<T>,
+}
+unsafe impl<T> Send for SendableTensor<T> where T: tensorflow::TensorType {}
+impl<T> SendableTensor<T>
+where
+    T: tensorflow::TensorType,
+{
+    pub fn new(tensor: Tensor<T>) -> SendableTensor<T> {
+        SendableTensor { tensor }
+    }
+}
+impl<T> From<Tensor<T>> for SendableTensor<T>
+where
+    T: tensorflow::TensorType,
+{
+    fn from(tensor: Tensor<T>) -> SendableTensor<T> {
+        SendableTensor { tensor }
+    }
+}
+impl<T> Into<Tensor<T>> for SendableTensor<T>
+where
+    T: tensorflow::TensorType,
+{
+    fn into(self) -> Tensor<T> {
+        self.tensor
+    }
+}
+
 pub struct BrainBuilder<'a, Layer: BuildLayer + AccessLayer + ConfigureLayer> {
     name: &'a str,
     num_inputs: u64,
@@ -436,55 +471,53 @@ impl<'a> Brain<'a> {
     ///
     /// * labels: the labels for the inputs as a collection of flattened 1D vector
     ///
-    pub fn train<'b, T, I, L, const Ilen: usize, const Llen: usize>(
+    pub fn train<T, I, const Ilen: usize, L, const Llen: usize>(
         &mut self,
         inputs: I,
         labels: L,
     ) -> Result<Vec<Tensor<T>>, Box<dyn Error>>
     where
         T: tensorflow::TensorType + Clone,
-        I: IntoIterator<Item = &'b [T; Ilen]>,
-        L: IntoIterator<Item = &'b [T; Llen]>,
+        I: IntoIterator<Item = [T; Ilen]> //also par_iter
+            + IntoParallelIterator<Item = [T; Ilen]>,
+        L: IntoIterator<Item = [T; Llen]> //also par_iter
+            + IntoParallelIterator<Item = [T; Llen]>,
     {
         //TODO: do we lose variable state each session?
         //TODO: k-folding extension method
         log::debug!("trainning..");
         let mut result = vec![];
-        let mut inputs = inputs.into_iter();
-        let mut labels = labels.into_iter();
 
-        //get the length of each slice in input
-        let first_input = inputs.next().unwrap();
-        let first_label = labels.next().unwrap();
-        let input_len = first_input.len();
-        let label_len = first_label.len();
-
-        let mut input_tensors: Vec<Tensor<T>> = inputs
-            .into_iter()
+        let mut input_tensors: Vec<SendableTensor<T>> = inputs
+            .into_par_iter()
             .map(|input| {
-                Tensor::new(&[1u64, input_len as u64])
-                    .with_values(input)
-                    //TODO: propagate this
+                let res: SendableTensor<T> = Tensor::new(&[1u64, Ilen as u64])
+                    .with_values(&input)
                     .unwrap()
+                    .into();
+                res
             })
-            .collect();
-        //add the first input back to the front of the vector
-        input_tensors.insert(
-            0,
-            Tensor::new(&[1u64, input_len as u64]).with_values(first_input)?,
-        );
-        let mut label_tensors: Vec<Tensor<T>> = labels
+            .collect::<Vec<SendableTensor<T>>>();
+        //cast sendable tensors into plain ol tensors
+        let mut input_tensors: Vec<Tensor<T>> = input_tensors
             .into_iter()
+            .map(|input| input.into())
+            .collect::<Vec<Tensor<T>>>();
+        let mut label_tensors: Vec<SendableTensor<T>> = labels
+            .into_par_iter()
             .map(|label| {
-                Tensor::new(&[1u64, label_len as u64])
-                    .with_values(label)
+                let res: SendableTensor<T> = Tensor::new(&[1u64, Llen as u64])
+                    .with_values(&label)
                     .unwrap()
+                    .into();
+                res
             })
-            .collect();
-        label_tensors.insert(
-            0,
-            Tensor::new(&[1u64, label_len as u64]).with_values(first_label)?,
-        );
+            .collect::<Vec<SendableTensor<T>>>();
+        //cast sendable tensors into plain ol tensors
+        let mut label_tensors: Vec<Tensor<T>> = label_tensors
+            .into_iter()
+            .map(|label| label.into())
+            .collect::<Vec<Tensor<T>>>();
         log::debug!("input_tensors.len(): {}", input_tensors.len());
         log::debug!("label_tensors.len(): {}", label_tensors.len());
 
@@ -552,7 +585,7 @@ impl<'a> Brain<'a> {
 
         //get the length of each slice in input
         let first_input = inputs.next().unwrap();
-        let input_len = first_input.len();
+        let input_len = first_input.clone().len();
 
         let mut input_tensors: Vec<Tensor<T>> = inputs
             .into_iter()
@@ -653,6 +686,7 @@ mod tests {
         // create 100 entries for inputs and outputs of xor
         for _ in 0..100 {
             let mut inputs = Vec::new();
+            //let outputs: mut Vec<&[f32;1] = Vec::new();
             let mut outputs = Vec::new();
             for _ in 0..10 {
                 // instead of the above, generate either 0 or 1 and cast to f32
@@ -661,7 +695,7 @@ mod tests {
                 inputs.push(input);
                 outputs.push(output);
             }
-            let res = Net.train(&inputs, &outputs).unwrap();
+            let res = Net.train(inputs, outputs).unwrap();
             //println!("inputs: {:?} \n res: {:?}", inputs, res);
         }
         //save the model
@@ -702,6 +736,7 @@ mod tests {
         //train the network
         let mut rrng = rand::thread_rng();
         // create 100 entries for inputs and outputs of xor
+        //let mut counter: usize = 0;
         for _ in 0..400 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
@@ -709,6 +744,11 @@ mod tests {
             let mut input_two = half::f16::from_f32(0.0);
             let mut output_cast = half::f16::from_f32(1.0);
             for _ in 0..250 {
+                //print the counter
+                //counter += 1;
+                //if counter % 1000 == 0 {
+                //    println!("counter: {}", counter);
+                //}
                 // instead of the above, generate either 0 or 1 and cast to f32
                 let input_one = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
                 let input_two = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
@@ -724,7 +764,7 @@ mod tests {
                 outputs.push(output);
             }
             assert_eq!(inputs.len(), outputs.len());
-            let res = Net.train(&inputs, &outputs).unwrap();
+            let res = Net.train(inputs, outputs).unwrap();
         }
         //print the output of the network
         let mut input = vec![
