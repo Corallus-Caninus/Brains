@@ -243,9 +243,10 @@ where
 }
 
 //LAYER DEFINITIONS//
-//Layers use an optional inheritence pattern for fast blanket implementation generalization.
-//each layer doesnt have to inherit LayerState and derive InheritState but you will likely end up
-//doing this yourself otherwise.
+//Layers use an optional inheritence pattern for fast blanket implementation
+//generalization via accessors to define shared structure.
+//each layer doesnt have to inherit LayerState and derive InheritState but you will
+//likely end up doing this yourself otherwise.
 //NOTE: currently AccessLayer and ConfigureLayer are manditory for integrating into Brains so the
 //optional inheritence pattern is *currently* the standard for extensibility
 #[derive(InheritState)]
@@ -254,14 +255,10 @@ impl BuildLayer for std_layer {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
         //instead use the accessor
         let input_size = self.get_input_size();
-        //let output_size = self.0.output_size;
         let output_size = self.get_output_size();
-        //tensorflow status
-        //let input = self.0.input.clone().unwrap(); //TODO: propagate this with the weird status
         let input = self.get_input().clone().unwrap();
-        //let dtype = self.0.dtype;
         let dtype = self.get_dtype();
-        let mut scope = scope.new_sub_scope("layer"); //TODO: layer counter or some uuid
+        let mut scope = scope.new_sub_scope("layer"); //TODO: layer counter or some uuid?
         let scope = &mut scope;
         let w_shape = ops::constant(&[input_size as i64, output_size as i64][..], scope)?;
         let mut init_bias: Tensor<f32> = Tensor::new(&[1u64, output_size as u64]);
@@ -272,11 +269,9 @@ impl BuildLayer for std_layer {
         let w = Variable::builder()
             .initial_value(
                 ops::RandomStandardNormal::new()
-                    //.dtype(DataType::Float)
                     .dtype(dtype)
                     .build(w_shape, scope)?,
             )
-            //.data_type(DataType::Float)
             .data_type(dtype)
             .shape([input_size, output_size])
             .build(&mut scope.with_op_name("w"))?;
@@ -294,16 +289,12 @@ impl BuildLayer for std_layer {
                         scope,
                     )?,
                     scope,
-                )?, // ops::RandomStandardNormal::new()
-                    //     .dtype(DataType::Float)
-                    //     .build(ops::constant(&[1i64,output_size as i64][..], scope)?, scope)?,
+                )?,
             )
-            //.data_type(DataType::Float)
             .data_type(dtype)
             .shape(&[1i64, output_size as i64][..])
             .build(&mut scope.with_op_name("b"))?;
 
-        //n is input_size to be divided at each node in order to normalize the signals at each node before activation
         let act = (self.get_activation().as_ref().unwrap())(
             ops::add(
                 ops::mat_mul(input.clone(), w.output().clone(), scope)?,
@@ -322,19 +313,20 @@ impl BuildLayer for std_layer {
         })
     }
 }
+
 //TODO: this should be solved also with the derive macro for InheritState
-impl InitializeLayer for std_layer {
-    fn init() -> Self {
-        std_layer(LayerState {
-            input: None,
-            input_size: 0,
-            output_size: 0,
-            width: 0,
-            activation: None,
-            dtype: DataType::Float,
-        })
-    }
-}
+//impl InitializeLayer for std_layer {
+//    fn init() -> Self {
+//        std_layer(LayerState {
+//            input: None,
+//            input_size: 0,
+//            output_size: 0,
+//            width: 0,
+//            activation: None,
+//            dtype: DataType::Float,
+//        })
+//    }
+//}
 //TODO: fix lazy builder
 //pub fn std() -> Vec<Box<std_layer>> {
 //    vec![Box::new(std_layer::init())]

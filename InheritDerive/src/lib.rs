@@ -9,6 +9,19 @@
 //        &self.0
 //    }
 //}
+////also impl the following
+//impl InitializeLayer for T_layer{
+//    fn init() -> Self {
+//        T_layer(LayerState {
+//            input: None,
+//            input_size: 0,
+//            output_size: 0,
+//            width: 0,
+//            activation: None,
+//            dtype: DataType::Float,
+//        })
+//    }
+//}
 //a trait that automates deriving the InheritState trait for a struct that contains a LayerState as
 //self.0
 use proc_macro::TokenStream;
@@ -28,18 +41,19 @@ pub fn derive_inherit_state(input: TokenStream) -> TokenStream {
                 &self.0
             }
         }
+        impl InitializeLayer for #name {
+            fn init() -> Self {
+                #name(LayerState {
+                    input: None,
+                    input_size: 0,
+                    output_size: 0,
+                    width: 0,
+                    activation: None,
+                    dtype: DataType::Float,
+                })
+            }
+        }
     };
+
     gen.into()
 }
-//macro_rules! inherit_state {
-//    ($struct_name:ident) => {
-//        impl InheritState for $struct_name {
-//            fn get_mut_layer_state(&mut self) -> &mut LayerState {
-//                &mut self.0
-//            }
-//            fn get_layer_state(&self) -> &LayerState {
-//                &self.0
-//            }
-//        }
-//    };
-//}
