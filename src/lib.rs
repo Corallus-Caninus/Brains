@@ -633,7 +633,6 @@ mod tests {
         let mut scope = Scope::new_root_scope();
         let opt = optimizer::GradientDescent()
             .learning_rate(0.01 as f32)
-            .dtype(DataType::Float)
             .build(&mut scope)
             .unwrap();
         let mut Net = Brain()
@@ -678,7 +677,6 @@ mod tests {
             .learning_rate(half::f16::from_f32(0.01))
             .rho(half::f16::from_f32(0.95))
             .epsilon(half::f16::from_f32(1e-6))
-            .dtype(DataType::Half)
             .build(&mut scope)
             .unwrap();
         //        let opt = optimizer::GradientDescent()

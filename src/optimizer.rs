@@ -82,11 +82,6 @@ where
         self.learning_rate = Some(learning_rate);
         self
     }
-    ///Set the data type for the optimizer
-    pub fn dtype(mut self, dtype: DataType) -> Self {
-        self.dtype = Some(dtype);
-        self
-    }
     ///Build the optimizer to pass to a BrainBuilder
     pub fn build(mut self, scope: &mut Scope) -> Result<LossOptimizer, Status> {
         Ok(Box::new(GradientDescentOptimizer::new(ops::constant(
@@ -135,11 +130,6 @@ where
     ///Set the epsilon for the optimizer
     pub fn epsilon(mut self, epsilon: T) -> Self {
         self.epsilon = Some(epsilon);
-        self
-    }
-    ///Set the data type for the optimizer
-    pub fn dtype(mut self, dtype: DataType) -> Self {
-        self.dtype = Some(dtype);
         self
     }
     ///Build the optimizer to pass to a BrainBuilder
