@@ -638,7 +638,13 @@ mod tests {
         let mut Net = Brain()
             .name("test-builder")
             .num_inputs(2)
-            .add_layer(layers::std_layer::new(20, activations::Relu()))
+            //demonstrate internal method chaining builder alternative:
+            //.add_layer(layers::std_layer::new(20, activations::Relu()))
+            .add_layer(
+                layers::std_layer::init()
+                    .width(20)
+                    .activation(Some(activations::Relu())),
+            )
             .add_layer(layers::std_layer::new(20, activations::Relu()))
             .add_layer(layers::std_layer::new(1, activations::Relu()))
             .dtype(DataType::Float)
