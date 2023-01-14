@@ -577,29 +577,26 @@ impl<'a> Brain<'a> {
     ) -> Result<Vec<Tensor<T>>, Box<dyn Error>>
     where
         T: tensorflow::TensorType + Clone,
-        I: IntoIterator<Item = &'b [T; Ilen]>,
+        I: IntoIterator<Item = [T; Ilen]> + IntoParallelIterator<Item = [T; Ilen]>,
     {
         log::debug!("infering..");
         let mut result = vec![];
-        let mut inputs = inputs.into_iter();
-
-        //get the length of each slice in input
-        let first_input = inputs.next().unwrap();
-        let input_len = first_input.clone().len();
-
-        let mut input_tensors: Vec<Tensor<T>> = inputs
-            .into_iter()
+        let mut input_tensors: Vec<SendableTensor<T>> = inputs
+            .into_par_iter()
             .map(|input| {
-                Tensor::new(&[1u64, input_len as u64])
-                    .with_values(input)
+                let res: SendableTensor<T> = Tensor::new(&[1u64, Ilen as u64])
+                    .with_values(&input)
                     .unwrap()
+                    .into();
+                res
             })
-            .collect();
-        //add the first input back to the front of the vector
-        input_tensors.insert(
-            0,
-            Tensor::new(&[1u64, input_len as u64]).with_values(first_input)?,
-        );
+            .collect::<Vec<SendableTensor<T>>>();
+        //cast sendable tensors into plain ol tensors
+        let mut input_tensors: Vec<Tensor<T>> = input_tensors
+            .into_iter()
+            .map(|input| input.into())
+            .collect::<Vec<Tensor<T>>>();
+
         log::debug!("input_tensors.len(): {}", input_tensors.len());
         for input_tensor in input_tensors.iter_mut() {
             let mut run_args = SessionRunArgs::new();
@@ -612,36 +609,6 @@ impl<'a> Brain<'a> {
         }
         Ok(result)
     }
-    //        &self,
-    //        inputs: &Vec<Vec<T>>,
-    //    ) -> Result<Vec<Tensor<T>>, Box<dyn Error>> {
-    //        let mut result = vec![];
-    //        let mut input_tensor: Tensor<T> = Tensor::new(&[1u64, inputs[0].len() as u64]);
-    //        let mut input_iter = inputs.into_iter();
-    //        let mut i = 0;
-    //        loop {
-    //            i += 1;
-    //            let input = input_iter.next();
-    //            if input.is_none() {
-    //                break;
-    //            }
-    //            let input = input.unwrap();
-    //            // now get input and label as slices
-    //            let input = input.as_slice();
-    //            // now assign the input and label to the tensor
-    //            for i in 0..input.len() {
-    //                input_tensor[i] = input[i].clone();
-    //            }
-    //            let mut run_args = SessionRunArgs::new();
-    //            let output = run_args.request_fetch(&self.Output_op, 0);
-    //            run_args.add_feed(&self.Input, 0, &input_tensor);
-    //            self.session.run(&mut run_args)?;
-    //            let output: Tensor<T> = run_args.fetch(output)?;
-    //            log::info!("input: {:?} output: {:?}", input, output);
-    //            result.push(output);
-    //        }
-    //        Ok(result)
-    //    }
 }
 
 //TODO: serialize any data outside of the graph, currently this isnt necessary and ideally we
@@ -708,7 +675,7 @@ mod tests {
     fn test_builder() {
         let mut scope = Scope::new_root_scope();
         let opt = optimizer::Adadelta()
-            .learning_rate(half::f16::from_f32(0.1))
+            .learning_rate(half::f16::from_f32(0.01))
             .rho(half::f16::from_f32(0.95))
             .epsilon(half::f16::from_f32(1e-6))
             .dtype(DataType::Half)
@@ -737,13 +704,13 @@ mod tests {
         let mut rrng = rand::thread_rng();
         // create 100 entries for inputs and outputs of xor
         //let mut counter: usize = 0;
-        for _ in 0..400 {
+        for _ in 0..250 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
             let mut input_one = half::f16::from_f32(1.0);
             let mut input_two = half::f16::from_f32(0.0);
             let mut output_cast = half::f16::from_f32(1.0);
-            for _ in 0..250 {
+            for _ in 0..400 {
                 //print the counter
                 //counter += 1;
                 //if counter % 1000 == 0 {
@@ -774,7 +741,7 @@ mod tests {
             [half::f16::from_f32(1.0), half::f16::from_f32(1.0)],
         ];
 
-        let output = Net.infer(&input).unwrap();
+        let output = Net.infer(input.clone()).unwrap();
         println!(
             "XOR test input: {:?} \n XOR test output: {:?}",
             input, output
