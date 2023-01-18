@@ -107,20 +107,19 @@ where
         self.tensor
     }
 }
-
-pub struct BrainBuilder<'a, Layer: BuildLayer + AccessLayer + ConfigureLayer> {
+//create a trait for BuildLayer + AccessLayer + ConfigureLayer
+//TODO: we use NoChain since dyn cant return Self
+pub struct BrainBuilder<'a> {
+    //Layer: BuildLayer + AccessLayer + ConfigureLayerNoChain> {
     name: &'a str,
     num_inputs: u64,
     dtype: DataType,
     Optimizer: Option<optimizer::LossOptimizer>,
     error: Option<LossFunction>,
-    layers: Vec<Layer>,
+    layers: Vec<Box<dyn Layer>>,
 }
 ///Constructor to initialize the BrainBuilder
-pub fn Brain<'a, Layer>() -> BrainBuilder<'a, Layer>
-where
-    Layer: BuildLayer + AccessLayer + ConfigureLayer,
-{
+pub fn Brain<'a>() -> BrainBuilder<'a> {
     BrainBuilder {
         name: "Brain",
         num_inputs: 0,
@@ -131,12 +130,10 @@ where
     }
 }
 //TODO: a trait or some way to do std_layer instead of std_layer::new() (maybe)
-impl<'a, Layer> BrainBuilder<'a, Layer>
-where
-    Layer: BuildLayer + AccessLayer + ConfigureLayer,
-    //Opt: Optimizer,
+impl<'a> BrainBuilder<'a>
+//Opt: Optimizer,
 {
-    pub fn add_layer(mut self, layer: Layer) -> Self {
+    pub fn add_layer(mut self, layer: Box<dyn Layer>) -> Self {
         self.layers.push(layer);
         self
     }
@@ -162,7 +159,7 @@ where
     }
     pub fn build(mut self, scope: &mut Scope) -> Result<Brain, Status> {
         //TODO: ~Just Rust Things~
-        let mut layers = Vec::new();
+        let mut layers: Vec<Box<dyn Layer>> = Vec::new();
         for i in 0..self.layers.len() {
             layers.push(self.layers.pop().unwrap());
         }
@@ -210,11 +207,11 @@ pub struct Brain<'a> {
 impl<'a> Brain<'a> {
     //TODO: type safety: use trait bounds to allow for using bigints etc for counting//indexing
     //      types.
-    pub fn new<Layer: BuildLayer + AccessLayer + ConfigureLayer>(
+    pub fn new(
         name: String,
         //TODO: a vec of layers here will suffice for now, but this will be a builder pattern as
         //soon as possible
-        layers: Vec<Layer>,
+        layers: Vec<Box<dyn Layer>>,
         //TODO: optimizer,
         optimizer: Option<optimizer::LossOptimizer>,
         error: Option<LossFunction>,
@@ -258,14 +255,12 @@ impl<'a> Brain<'a> {
             //      (not the aformbentioned Brain builder)
 
             //set the dtype based on the Brain dtype
-            layer = layer.dtype(dtype);
-            layer = layer.input(layer_input_iter.clone());
-            layer = layer.input_size(input_size);
-            //TODO: refactor this
+            layer.dtype(dtype);
+            layer.input(layer_input_iter.clone());
+            layer.input_size(input_size);
             input_size = layer.get_width();
             output_size = input_size;
-            layer = layer.output_size(output_size);
-            //TODO: end of extraction routine
+            layer.output_size(output_size);
 
             let parameters = layer.build_layer(&mut scope)?;
             let vars = parameters.variables;
@@ -627,6 +622,7 @@ impl SerializedNetwork {
 
 #[cfg(test)]
 mod tests {
+    use crate::layers::*;
     use crate::*;
     #[test]
     fn test_initial() {
@@ -639,14 +635,14 @@ mod tests {
             .name("test-builder")
             .num_inputs(2)
             //demonstrate internal method chaining builder alternative:
-            //.add_layer(layers::std_layer::new(20, activations::Relu()))
-            .add_layer(
-                layers::std_layer::init()
+            //.add_layer(layers::std::new(20, activations::Relu()))
+            .add_layer(Box::new(
+                fully_connected::init()
                     .width(20)
-                    .activation(Some(activations::Relu())),
-            )
-            .add_layer(layers::std_layer::new(20, activations::Relu()))
-            .add_layer(layers::std_layer::new(1, activations::Relu()))
+                    .activation(activations::Relu()),
+            ))
+            .add_layer(fully_connected::layer(20, activations::Relu()))
+            .add_layer(fully_connected::layer(1, activations::Relu()))
             .dtype(DataType::Float)
             .optimizer(opt)
             .error(optimizer::l2())
@@ -695,9 +691,9 @@ mod tests {
             .num_inputs(2)
             //TODO: it would be nice if there was compile time warning if the target device ISA
             //      doesnt support the given type (also for tf_ops)
-            .add_layer(layers::std_layer::new(20, activations::Elu()))
-            .add_layer(layers::std_layer::new(20, activations::Elu()))
-            .add_layer(layers::std_layer::new(1, activations::Tanh()))
+            .add_layer(fully_connected::layer(20, activations::Elu()))
+            .add_layer(fully_connected::layer(20, activations::Elu()))
+            .add_layer(fully_connected::layer(1, activations::Tanh()))
             .dtype(DataType::Half)
             .optimizer(opt)
             .error(optimizer::l2())
@@ -758,6 +754,66 @@ mod tests {
         Net.save(save_file.as_str()).unwrap();
 
         return;
+    }
+    #[test]
+    fn test_norm_net() {
+        let mut scope = Scope::new_root_scope();
+        let opt = optimizer::GradientDescent()
+            .learning_rate(half::f16::from_f32(0.01 as f32))
+            .build(&mut scope)
+            .unwrap();
+        let mut Net = Brain()
+            .name("test-norm")
+            .num_inputs(2)
+            .add_layer(norm::layer(20, activations::Tanh()))
+            .add_layer(norm::layer(20, activations::Tanh()))
+            .add_layer(norm::layer(1, activations::Tanh()))
+            .add_layer(scale::magnitude(10.0 as f32))
+            .dtype(DataType::Half)
+            .optimizer(opt)
+            .error(optimizer::l2())
+            .build(&mut scope)
+            .unwrap();
+        let mut rrng = rand::thread_rng();
+        // create 100 entries for inputs and outputs of xor
+
+        for _ in 0..250 {
+            let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
+            let mut input_one = half::f16::from_f32(1.0);
+            let mut input_two = half::f16::from_f32(0.0);
+            let mut output_cast = half::f16::from_f32(1.0);
+            for _ in 0..400 {
+                // instead of the above, generate either 0 or 1 and cast to f32
+                let input_one = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                let input_two = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                let input = [input_one, input_two];
+                output_cast = half::f16::from_f32(
+                    ((input[0].to_f32()) as u8 ^ input[1].to_f32() as u8) as f32,
+                )
+                .clone();
+                let output = [output_cast];
+                //cast input and outputs to bf16
+
+                inputs.push(input);
+                outputs.push(output);
+            }
+            assert_eq!(inputs.len(), outputs.len());
+            let res = Net.train(inputs, outputs).unwrap();
+        }
+        //print the output of the network
+        let mut input = vec![
+            [half::f16::from_f32(0.0), half::f16::from_f32(1.0)],
+            [half::f16::from_f32(1.0), half::f16::from_f32(0.0)],
+            [half::f16::from_f32(0.0), half::f16::from_f32(0.0)],
+            [half::f16::from_f32(1.0), half::f16::from_f32(1.0)],
+        ];
+
+        let output = Net.infer(input.clone()).unwrap();
+        println!(
+            "NORM NET XOR test input: {:?} \n XOR test output: {:?}",
+            input, output
+        );
     }
 }
 //TODO: restore the below unittests with builder once the above test passes
