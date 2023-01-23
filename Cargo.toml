@@ -1,10 +1,10 @@
 [package]
 name = "Brains"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["Corallus-Caninus <ward.joshua92@yahoo.com>"]
 edition = "2021"
 description = "Rust based Artificial Neural Network framework with TensorFlow"
-license = "MIT"
+license = "GNU"
 
 [profile.release]
 lto=true
