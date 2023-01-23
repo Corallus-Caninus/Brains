@@ -31,4 +31,5 @@ anyhow = "1.0.53"
 rayon = "1.5.1"
 log = "0.4.14"
 simple-logging = "2.0.2"
-InheritDerive = { path = "InheritDerive" }
+#InheritDerive = { path = "InheritDerive" }
+InheritDerive = "0.1.0"
