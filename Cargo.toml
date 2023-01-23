@@ -32,4 +32,3 @@ rayon = "1.5.1"
 log = "0.4.14"
 simple-logging = "2.0.2"
 InheritDerive = { path = "InheritDerive" }
-

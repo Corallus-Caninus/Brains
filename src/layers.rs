@@ -8,6 +8,7 @@
 //split type operations or noop type layers where towers may have different length.
 //this is for simplicity of the framework and may be extended on in the future.
 use half::f16;
+use rand::Rng;
 use tensorflow::ops;
 use tensorflow::ops::TensorArrayV3;
 use tensorflow::train::AdadeltaOptimizer;
@@ -307,14 +308,14 @@ pub struct fully_connected(LayerState);
 impl BuildLayer for fully_connected {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
         //instead use the accessor
-        let input_size = self.get_input_size();
-        let output_size = self.get_output_size();
+        let input_size = self.get_input_size() as i32;
+        let output_size = self.get_output_size() as i32;
         let input = self.get_input().clone().unwrap();
         let dtype = self.get_dtype();
         let mut scope = scope.new_sub_scope("std_layer"); //TODO: layer counter or some uuid?
         let scope = &mut scope;
-        let w_shape = ops::constant(&[input_size as i64, output_size as i64][..], scope)?;
-        let mut init_bias: Tensor<f32> = Tensor::new(&[1u64, output_size as u64]);
+        let w_shape = ops::constant(&[input_size, output_size][..], scope)?;
+        let mut init_bias: Tensor<f32> = Tensor::new(&[1, output_size as u64]);
         for i in 0..output_size {
             init_bias[i as usize] = 0.0 as f32;
         }
@@ -337,7 +338,7 @@ impl BuildLayer for fully_connected {
                 //trainning time.
                 ops::Cast::new().SrcT(DataType::Float).DstT(dtype).build(
                     ops::constant(
-                        Tensor::new(&[1u64, output_size as u64])
+                        Tensor::new(&[1 as u64, output_size as u64])
                             .with_values(&vec![0.0f32; output_size as usize][..])?,
                         scope,
                     )?,
@@ -345,7 +346,7 @@ impl BuildLayer for fully_connected {
                 )?,
             )
             .data_type(dtype)
-            .shape(&[1i64, output_size as i64][..])
+            .shape(&[1, output_size][..])
             .build(&mut scope.with_op_name("b"))?;
 
         let act = (self.get_activation().as_ref().unwrap())(
@@ -367,6 +368,90 @@ impl BuildLayer for fully_connected {
     }
 }
 
+#[derive(InheritState)]
+pub struct fully_connected_zero_init(LayerState);
+impl BuildLayer for fully_connected_zero_init {
+    fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
+        //instead use the accessor
+        let input_size = self.get_input_size() as i32;
+        let output_size = self.get_output_size() as i32;
+        let input = self.get_input().clone().unwrap();
+        let dtype = self.get_dtype();
+        let mut scope = scope.new_sub_scope("std_layer_zero_init"); //TODO: layer counter or some uuid?
+        let scope = &mut scope;
+        let w_shape = ops::constant(&[input_size, output_size][..], scope)?;
+        let mut init_bias: Tensor<f32> = Tensor::new(&[1, output_size as u64]);
+        for i in 0..output_size {
+            init_bias[i as usize] = 0.0 as f32;
+        }
+
+        //        let w = Variable::builder()
+        //            .initial_value(
+        //                ops::RandomStandardNormal::new()
+        //                    .dtype(dtype)
+        //                    .build(w_shape, scope)?,
+        //            )
+        //            .data_type(dtype)
+        //            .shape([input_size, output_size])
+        //            .build(&mut scope.with_op_name("w"))?;
+        //initialize to zero
+        //figure out which DataType dtype is (e.g. the enum maps to f32 f64 etc.
+
+        let init_w = ops::constant(
+            Tensor::new(&[input_size as u64, output_size as u64])
+                //.with_values(&vec![0.0f32; (input_size * output_size) as usize][..])?,
+                //same as above but use dtype
+                .with_values(&vec![0.0f32; (input_size * output_size) as usize][..])?,
+            scope,
+        )?;
+        let w = Variable::builder()
+            .initial_value(
+                ops::Cast::new()
+                    .SrcT(DataType::Float)
+                    .DstT(dtype)
+                    .build(init_w, scope)?,
+            )
+            .data_type(dtype)
+            .shape([input_size, output_size])
+            .build(&mut scope.with_op_name("w"))?;
+
+        let b = Variable::builder()
+            .initial_value(
+                //this is more sensible than random by the nature of the bias,
+                //otherwise we will miss correlated signals by default
+                //with RandomStandardNormal, albeit with a little longer
+                //trainning time.
+                ops::Cast::new().SrcT(DataType::Float).DstT(dtype).build(
+                    ops::constant(
+                        Tensor::new(&[1 as u64, output_size as u64])
+                            .with_values(&vec![0.0f32; output_size as usize][..])?,
+                        scope,
+                    )?,
+                    scope,
+                )?,
+            )
+            .data_type(dtype)
+            .shape(&[1, output_size][..])
+            .build(&mut scope.with_op_name("b"))?;
+
+        let act = (self.get_activation().as_ref().unwrap())(
+            ops::add(
+                ops::mat_mul(input.clone(), w.output().clone(), scope)?,
+                b.output().clone(),
+                scope,
+            )?
+            .into(),
+            scope,
+        )?;
+
+        let output_op = act.clone();
+        Ok(TrainnableLayer {
+            variables: vec![w, b],
+            output: act.into(),
+            operation: output_op,
+        })
+    }
+}
 ///================
 ///----NORM_NET----
 ///================
@@ -422,7 +507,7 @@ impl BuildLayer for norm {
         let dtype = self.get_dtype();
         let mut scope = scope.new_sub_scope("norm_layer"); //TODO: layer counter or some uuid?
         let scope = &mut scope;
-        let w_shape = ops::constant(&[input_size as i64, output_size as i64][..], scope)?;
+        let w_shape = ops::constant(&[input_size as i32, output_size as i32][..], scope)?;
 
         let w = Variable::builder()
             .initial_value(
@@ -434,40 +519,18 @@ impl BuildLayer for norm {
             .shape([input_size, output_size])
             .build(&mut scope.with_op_name("w"))?;
 
-        //TODO: this should be a 0 rank const
-        let input_size = Tensor::new(&[1u64, output_size as u64])
-            .with_values(&vec![input_size; output_size as usize][..])?;
+        //TODO: this should be a 0 rank const (but that would just be a broadcast anyways)
+        //let input_size = Tensor::new(&[1u64, output_size as u64])
+        //    .with_values(&vec![input_size; output_size as usize][..])?;
         let input_size_const = ops::constant(input_size, scope)?;
         let input_size_as_dtype = ops::Cast::new()
             .SrcT(DataType::UInt64)
             .DstT(dtype.clone())
             .build(input_size_const, scope)?;
 
-        //take w.output() and set an artificial gradient of x^2, this causes a normalized gradient that
-        //goes to 0 as the weights go to 0.
-        let three = ops::constant(3, scope)?;
-        let three = ops::Cast::new()
-            .SrcT(DataType::Int32)
-            .DstT(dtype.clone())
-            .build(three.clone(), scope)?;
-
-        let dropout_derivative = ops::div(
-            //mul by itself 3 times
-            //ops::mul(w.output().clone(), three.clone(), scope)?,
-            ops::mul(
-                ops::mul(w.output().clone(), w.output().clone(), scope)?,
-                w.output().clone(),
-                scope,
-            )?,
-            three,
-            scope,
-        )?;
-
         let act = (self.get_activation().as_ref().unwrap())(
             ops::div(
-                //use a tangent operation to cause connection wise dropout. we can do this because
-                //the paramaters and signals are normalized.
-                ops::mat_mul(input.clone(), dropout_derivative, scope)?,
+                ops::mat_mul(input.clone(), w.output().clone(), scope)?,
                 input_size_as_dtype,
                 scope,
             )?

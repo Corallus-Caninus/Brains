@@ -42,6 +42,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::os;
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tensorflow::ops;
 use tensorflow::train::AdadeltaOptimizer;
@@ -73,19 +74,27 @@ use tensorflow::REGRESS_OUTPUTS;
 use uuid::Uuid;
 extern crate tensorflow;
 
+//PATCH FIXES THAT ARE TODO: FIX UPSTREAM TF-rs//
 //TODO: fix this:
 //unsafe impl<T> Send for Tensor<T> {}
 //create an extension struct just to derive the above impl:
 pub struct SendableTensor<T>
 where
     T: tensorflow::TensorType,
+    <T as tensorflow::TensorType>::InnerType: Send + Sync,
 {
     pub tensor: Tensor<T>,
 }
-unsafe impl<T> Send for SendableTensor<T> where T: tensorflow::TensorType {}
+unsafe impl<T> Send for SendableTensor<T>
+where
+    T: tensorflow::TensorType,
+    <T as tensorflow::TensorType>::InnerType: Send + Sync,
+{
+}
 impl<T> SendableTensor<T>
 where
     T: tensorflow::TensorType,
+    <T as tensorflow::TensorType>::InnerType: Send + Sync,
 {
     pub fn new(tensor: Tensor<T>) -> SendableTensor<T> {
         SendableTensor { tensor }
@@ -94,6 +103,7 @@ where
 impl<T> From<Tensor<T>> for SendableTensor<T>
 where
     T: tensorflow::TensorType,
+    <T as tensorflow::TensorType>::InnerType: Send + Sync,
 {
     fn from(tensor: Tensor<T>) -> SendableTensor<T> {
         SendableTensor { tensor }
@@ -102,11 +112,25 @@ where
 impl<T> Into<Tensor<T>> for SendableTensor<T>
 where
     T: tensorflow::TensorType,
+    <T as tensorflow::TensorType>::InnerType: Send + Sync,
 {
     fn into(self) -> Tensor<T> {
         self.tensor
     }
 }
+impl<T> Clone for SendableTensor<T>
+where
+    T: tensorflow::TensorType,
+    <T as tensorflow::TensorType>::InnerType: Send + Sync,
+{
+    fn clone(&self) -> Self {
+        SendableTensor {
+            tensor: self.tensor.clone(),
+        }
+    }
+}
+//END OF PATCH FIXES//
+
 //create a trait for BuildLayer + AccessLayer + ConfigureLayer
 //TODO: we use NoChain since dyn cant return Self
 pub struct BrainBuilder<'a> {
@@ -456,6 +480,21 @@ impl<'a> Brain<'a> {
         Ok(())
     }
 
+    ///feed in the given input and label tensors and run the session
+    pub fn feed<'b, 'c: 'b, T>(
+        mut run_args: SessionRunArgs<'b>,
+        Input: &'c Operation,
+        Label: &'c Operation,
+        input_tensor: &'c Tensor<T>,
+        label_tensor: &'c Tensor<T>,
+        session: &Session,
+    ) -> Result<(), Status>
+    where
+        T: tensorflow::TensorType + Clone + Send + Sync,
+        <T as tensorflow::TensorType>::InnerType: Send + Sync,
+    {
+        Ok(())
+    }
     // TODO: should also return error (need to structure output I'm allergic to tuples)
     // TODO: should pass in a threshold fitness to prevent over trainning
     /// Train the network with the given inputs and labels (must be synchronized in index order)
@@ -472,7 +511,8 @@ impl<'a> Brain<'a> {
         labels: L,
     ) -> Result<Vec<Tensor<T>>, Box<dyn Error>>
     where
-        T: tensorflow::TensorType + Clone,
+        T: tensorflow::TensorType + Clone + Send + Sync,
+        <T as tensorflow::TensorType>::InnerType: Send + Sync,
         I: IntoIterator<Item = [T; Ilen]> //also par_iter
             + IntoParallelIterator<Item = [T; Ilen]>,
         L: IntoIterator<Item = [T; Llen]> //also par_iter
@@ -481,82 +521,60 @@ impl<'a> Brain<'a> {
         //TODO: do we lose variable state each session?
         //TODO: k-folding extension method
         log::debug!("trainning..");
-        let mut result = vec![];
 
-        let mut input_tensors: Vec<SendableTensor<T>> = inputs
+        let mut input_tensors: Vec<Tensor<T>> = inputs
             .into_par_iter()
             .map(|input| {
-                let res: SendableTensor<T> = Tensor::new(&[1u64, Ilen as u64])
+                let res: Tensor<T> = Tensor::new(&[1u64, Ilen as u64])
                     .with_values(&input)
                     .unwrap()
                     .into();
                 res
             })
-            .collect::<Vec<SendableTensor<T>>>();
-        //cast sendable tensors into plain ol tensors
-        let mut input_tensors: Vec<Tensor<T>> = input_tensors
-            .into_iter()
-            .map(|input| input.into())
             .collect::<Vec<Tensor<T>>>();
-        let mut label_tensors: Vec<SendableTensor<T>> = labels
+        let mut label_tensors: Vec<Tensor<T>> = labels
             .into_par_iter()
             .map(|label| {
-                let res: SendableTensor<T> = Tensor::new(&[1u64, Llen as u64])
+                let res: Tensor<T> = Tensor::new(&[1u64, Llen as u64])
                     .with_values(&label)
-                    .unwrap()
-                    .into();
+                    .unwrap();
                 res
             })
-            .collect::<Vec<SendableTensor<T>>>();
-        //cast sendable tensors into plain ol tensors
-        let mut label_tensors: Vec<Tensor<T>> = label_tensors
-            .into_iter()
-            .map(|label| label.into())
             .collect::<Vec<Tensor<T>>>();
         log::debug!("input_tensors.len(): {}", input_tensors.len());
         log::debug!("label_tensors.len(): {}", label_tensors.len());
-
         let batch_size = input_tensors.len();
-        let mut avg_t = vec![];
-        for (input_tensor, label_tensor) in input_tensors.iter_mut().zip(label_tensors.iter_mut()) {
-            // start a timer
-            let start = Instant::now();
 
-            let mut run_args = SessionRunArgs::new();
-            run_args.add_target(&self.minimize);
+        let res: Vec<SendableTensor<T>> = 
+            //trainning_tensors
+            input_tensors.into_iter().zip(label_tensors.into_iter()).par_bridge()
+            .map(|(input_tensor, label_tensor)| {
+                let input_tensor_rock: Tensor<T> = input_tensor.into();
+                let label_tensor_rock: Tensor<T> = label_tensor.into();
 
-            let error = run_args.request_fetch(&self.error, 0);
-            let output = run_args.request_fetch(&self.Output_op, 0);
-            run_args.add_feed(&self.Input, 0, &input_tensor);
-            run_args.add_feed(&self.Label, 0, &label_tensor);
-            self.session.run(&mut run_args)?;
+                let mut run_args = SessionRunArgs::new();
+                let error = run_args.request_fetch(&self.error, 0);
+                let output = run_args.request_fetch(&self.Output_op, 0);
+                //run_args.add_target(&self.minimize);
+                run_args.add_target(&self.minimize);
 
-            let res: Tensor<T> = run_args.fetch(error)?;
-            let output: Tensor<T> = run_args.fetch(output)?;
-            //TODO: instead of logging these should be accessible within a local class buffer
-            //Vec<TrainOutput> or [TrainOutput; configured_recency_buffer_size]
+                run_args.add_feed(&self.Input, 0, &input_tensor_rock);
+                run_args.add_feed(&self.Label, 0, &label_tensor_rock);
+                self.session.run(&mut run_args).unwrap();
+                let error: SendableTensor<T> = run_args.fetch(error).unwrap().into();
+                //print the error
+                let tmp_error: Tensor<T> = error.clone().into();
+                println!("error: {:?}", tmp_error);
 
-            // get how long has passed
-            let elapsed = start.elapsed();
-            avg_t.push(elapsed.as_secs_f32());
 
-            // update the moving average for time
-            let average = avg_t.iter().sum::<f32>() / avg_t.len() as f32;
+                error
+            })
+            .collect::<Vec<SendableTensor<T>>>();
 
-            log::info!(
-                "training on {}\n input: {:?} label: {:?} error: {} output: {} seconds/epoch: {:?}",
-                batch_size,
-                input_tensor,
-                label_tensor,
-                res,
-                output,
-                average
-            );
-
-            result.push(res);
-        }
-
-        Ok(result)
+        Ok(res
+            .into_iter()
+            .map(|t| t.into())
+            .collect::<Vec<Tensor<T>>>())
     }
 
     //TODO: k-fold a given batch of inputs given a ratio of validation to trainning (up to user to
@@ -572,6 +590,7 @@ impl<'a> Brain<'a> {
     ) -> Result<Vec<Tensor<T>>, Box<dyn Error>>
     where
         T: tensorflow::TensorType + Clone,
+        <T as tensorflow::TensorType>::InnerType: Send + Sync,
         I: IntoIterator<Item = [T; Ilen]> + IntoParallelIterator<Item = [T; Ilen]>,
     {
         log::debug!("infering..");
@@ -604,6 +623,7 @@ impl<'a> Brain<'a> {
         }
         Ok(result)
     }
+    //TODO: function that returns the current parameters as an iterator of slices
 }
 
 //TODO: serialize any data outside of the graph, currently this isnt necessary and ideally we
@@ -632,7 +652,7 @@ mod tests {
             .build(&mut scope)
             .unwrap();
         let mut Net = Brain()
-            .name("test-builder")
+            .name("test-initial")
             .num_inputs(2)
             //demonstrate internal method chaining builder alternative:
             //.add_layer(layers::std::new(20, activations::Relu()))
@@ -641,7 +661,8 @@ mod tests {
                     .width(20)
                     .activation(activations::Relu()),
             ))
-            .add_layer(fully_connected::layer(20, activations::Relu()))
+            .add_layer(fully_connected::layer(200, activations::Relu()))
+            .add_layer(fully_connected::layer(200, activations::Relu()))
             .add_layer(fully_connected::layer(1, activations::Relu()))
             .dtype(DataType::Float)
             .optimizer(opt)
@@ -656,7 +677,7 @@ mod tests {
             let mut inputs = Vec::new();
             //let outputs: mut Vec<&[f32;1] = Vec::new();
             let mut outputs = Vec::new();
-            for _ in 0..10 {
+            for _ in 0..100 {
                 // instead of the above, generate either 0 or 1 and cast to f32
                 let input = [(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
                 let output = [(input[0] as u8 ^ input[1] as u8) as f32];
@@ -673,8 +694,9 @@ mod tests {
         return;
     }
     #[test]
-    fn test_builder() {
+    fn test_gpu() {
         let mut scope = Scope::new_root_scope();
+        let mut scope = scope.with_device("/gpu:0");
         let opt = optimizer::Adadelta()
             .learning_rate(half::f16::from_f32(0.01))
             .rho(half::f16::from_f32(0.95))
@@ -687,13 +709,17 @@ mod tests {
         //            .build(&mut scope)
         //            .unwrap();
         let mut Net = Brain()
-            .name("test-builder")
+            .name("test-gpu")
             .num_inputs(2)
             //TODO: it would be nice if there was compile time warning if the target device ISA
             //      doesnt support the given type (also for tf_ops)
-            .add_layer(fully_connected::layer(20, activations::Elu()))
-            .add_layer(fully_connected::layer(20, activations::Elu()))
-            .add_layer(fully_connected::layer(1, activations::Tanh()))
+            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
+            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
+            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
+            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
+            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
+            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
+            .add_layer(fully_connected_zero_init::layer(1, activations::Tanh()))
             .dtype(DataType::Half)
             .optimizer(opt)
             .error(optimizer::l2())
@@ -704,7 +730,7 @@ mod tests {
         let mut rrng = rand::thread_rng();
         // create 100 entries for inputs and outputs of xor
         //let mut counter: usize = 0;
-        for _ in 0..250 {
+        for _ in 0..25 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
             let mut input_one = half::f16::from_f32(1.0);
@@ -743,7 +769,7 @@ mod tests {
 
         let output = Net.infer(input.clone()).unwrap();
         println!(
-            "XOR test input: {:?} \n XOR test output: {:?}",
+            "test gpu XOR test input: {:?} \n XOR test output: {:?}",
             input, output
         );
 
@@ -756,20 +782,28 @@ mod tests {
         return;
     }
     #[test]
-    fn test_norm_net() {
+    fn test_mixed_precision() {
         let mut scope = Scope::new_root_scope();
-        let opt = optimizer::GradientDescent()
-            .learning_rate(half::f16::from_f32(0.01 as f32))
-            .build(&mut scope)
-            .unwrap();
+                let opt = optimizer::GradientDescent()
+                    .learning_rate(tensorflow::BFloat16::from(0.01 as f32))
+                    .build(&mut scope)
+                    .unwrap();
+//        let opt = optimizer::Adadelta()
+//            .learning_rate(tensorflow::BFloat16::from(0.01 as f32))
+//            .rho(tensorflow::BFloat16::from(0.95 as f32))
+//            .epsilon(tensorflow::BFloat16::from(1e-6 as f32))
+//            .build(&mut scope)
+//            .unwrap();
+
         let mut Net = Brain()
-            .name("test-norm")
+            .name("test-mixed_precision")
             .num_inputs(2)
-            .add_layer(norm::layer(20, activations::Tanh()))
-            .add_layer(norm::layer(20, activations::Tanh()))
-            .add_layer(norm::layer(1, activations::Tanh()))
-            .add_layer(scale::magnitude(10.0 as f32))
-            .dtype(DataType::Half)
+            .add_layer(fully_connected::layer(200, activations::Elu()))
+            .add_layer(fully_connected::layer(200, activations::Elu()))
+            .add_layer(fully_connected::layer(200, activations::Elu()))
+            .add_layer(fully_connected::layer(200, activations::Elu()))
+            .add_layer(fully_connected::layer(1, activations::Tanh()))
+            .dtype(DataType::BFloat16)
             .optimizer(opt)
             .error(optimizer::l2())
             .build(&mut scope)
@@ -780,20 +814,28 @@ mod tests {
         for _ in 0..250 {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
-            let mut input_one = half::f16::from_f32(1.0);
-            let mut input_two = half::f16::from_f32(0.0);
-            let mut output_cast = half::f16::from_f32(1.0);
-            for _ in 0..400 {
+            //            let mut input_one = half::bf16::from_f32(1.0);
+            //            let mut input_two = half::bf16::from_f32(0.0);
+            //            let mut output_cast = half::bf16::from_f32(1.0);
+            let mut input_one = tensorflow::BFloat16::from(1.0 as f32);
+            let mut input_two = tensorflow::BFloat16::from(0.0 as f32);
+            let mut output_cast = tensorflow::BFloat16::from(1.0 as f32);
+            for _ in 0..100 {
                 // instead of the above, generate either 0 or 1 and cast to f32
-                let input_one = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
-                let input_two = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                //let input_one = half::bf16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                //let input_two = half::bf16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                let input_one = tensorflow::BFloat16::from((rrng.gen::<u8>() & 1) as f32);
+                let input_two = tensorflow::BFloat16::from((rrng.gen::<u8>() & 1) as f32);
                 let input = [input_one, input_two];
-                output_cast = half::f16::from_f32(
-                    ((input[0].to_f32()) as u8 ^ input[1].to_f32() as u8) as f32,
-                )
-                .clone();
+                //output_cast = half::bf16::from_f32(
+                //    ((input[0].to_f32()) as u8 ^ input[1].to_f32() as u8) as f32,
+                //)
+                //.clone();
+                output_cast = tensorflow::BFloat16::from(
+                    (f32::from(input[0]) as u8 ^ f32::from(input[1]) as u8) as f32,
+                );
                 let output = [output_cast];
-                //cast input and outputs to bf16
+                //cast input and outputs to bbf16
 
                 inputs.push(input);
                 outputs.push(output);
@@ -802,193 +844,98 @@ mod tests {
             let res = Net.train(inputs, outputs).unwrap();
         }
         //print the output of the network
+        //        let mut input = vec![
+        //            [half::bf16::from_f32(0.0), half::bf16::from_f32(1.0)],
+        //            [half::bf16::from_f32(1.0), half::bf16::from_f32(0.0)],
+        //            [half::bf16::from_f32(0.0), half::bf16::from_f32(0.0)],
+        //            [half::bf16::from_f32(1.0), half::bf16::from_f32(1.0)],
+        //        ];
+        let mut input = vec![
+            [
+                tensorflow::BFloat16::from(0.0 as f32),
+                tensorflow::BFloat16::from(1.0 as f32),
+            ],
+            [
+                tensorflow::BFloat16::from(1.0 as f32),
+                tensorflow::BFloat16::from(0.0 as f32),
+            ],
+            [
+                tensorflow::BFloat16::from(0.0 as f32),
+                tensorflow::BFloat16::from(0.0 as f32),
+            ],
+            [
+                tensorflow::BFloat16::from(1.0 as f32),
+                tensorflow::BFloat16::from(1.0 as f32),
+            ],
+        ];
+
+        let output = Net.infer(input.clone()).unwrap();
+        //cast output to f32
+        let output = output.iter().map(|x| (x[0]).into()).collect::<Vec<f32>>();
+        println!(
+            "mixed precision XOR test input: {:?} \n XOR test output: {:?}",
+            input, output
+        );
+    }
+    #[test]
+    pub fn test_norm_net() {
+        let mut scope = Scope::new_root_scope();
+        let opt = optimizer::GradientDescent()
+            .learning_rate(half::f16::from_f32(0.01 as f32))
+            .build(&mut scope)
+            .unwrap();
+        let mut Net = Brain()
+            .name("test-norm-net")
+            .num_inputs(2)
+            .add_layer(norm::layer(20, activations::Tanh()))
+            .add_layer(norm::layer(20, activations::Tanh()))
+            .add_layer(norm::layer(20, activations::Tanh()))
+            .add_layer(norm::layer(1, activations::Tanh()))
+            .dtype(DataType::Half)
+            .optimizer(opt)
+            .error(optimizer::l1())
+            .build(&mut scope)
+            .unwrap();
+        let mut rrng = rand::thread_rng();
+        // create 100 entries for inputs and outputs of xor
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        for _ in 0..20{
+            for _ in 0..200 {
+                // instead of the above, generate either 0 or 1 and cast to f32
+                //let input_one = half::bf16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                //let input_two = half::bf16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                let input_one = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                let input_two = half::f16::from_f32((rrng.gen::<u8>() & 1) as f32);
+                let input = [input_one, input_two];
+                //output_cast = half::bf16::from_f32(
+                //    ((input[0].to_f32()) as u8 ^ input[1].to_f32() as u8) as f32,
+                //)
+                //.clone();
+                let output_cast = half::f16::from_f32(
+                    (f32::from(input[0]) as u8 ^ f32::from(input[1]) as u8) as f32,
+                );
+                let output = [output_cast];
+                //cast input and outputs to bbf16
+
+                inputs.push(input.clone());
+                outputs.push(output.clone());
+            }
+            let error = Net.train(inputs.clone(), outputs.clone()).unwrap();  
+            inputs.clear();
+            outputs.clear();
+            //print the last 10 errors with newlines
+            error.iter().rev().take(10).for_each(|x| println!("{:?}", x));
+        }
+        assert_eq!(inputs.len(), outputs.len());
+        //print the output of the network
         let mut input = vec![
             [half::f16::from_f32(0.0), half::f16::from_f32(1.0)],
             [half::f16::from_f32(1.0), half::f16::from_f32(0.0)],
             [half::f16::from_f32(0.0), half::f16::from_f32(0.0)],
             [half::f16::from_f32(1.0), half::f16::from_f32(1.0)],
         ];
-
-        let output = Net.infer(input.clone()).unwrap();
-        println!(
-            "NORM NET XOR test input: {:?} \n XOR test output: {:?}",
-            input, output
-        );
+        let res = Net.infer(input.clone()).unwrap();
+        println!("input: {:?} \n output: {:?}", input, res);
     }
 }
-//TODO: restore the below unittests with builder once the above test passes
-//    fn test_net() {
-//        log::debug!("test_net");
-//        //call the main function
-//        use crate::*;
-//
-//        //CONSTRUCTION//
-//        let mut hidden_layer = std_layer().input_size(10).output_size(10).activation(tanh(10));
-//        let layers = vec![
-//            //TODO: prefer a function constructor like Keras and just size of this layer, also stateful
-//            //      builder should track prev and next sizes
-//            //e.g.:
-//            //let mynet = Brain().std_layer(5, relu).std_layer(10, relu).std_layer(5, relu),
-//            hidden_layer,
-//            hidden_layer,
-//            hidden_layer,
-//            //std_layer().input_size(10).output_size(10).activation(relu(10)),
-//            //std_layer().input_size(10).output_size(10).activation(relu(10)),
-//            //std_layer().input_size(10).output_size(10).activation(relu(10)),
-//            //std_layer().input_size(10).output_size(10).activation(relu(10)),
-//        ];
-//        //let mut norm_net = Brain::new("test_net",2, 1, 10, 10, layers::std_layer(), activations::tanh(10), 1.0, 5 as f32).unwrap();
-//        let mut norm_net = Brain::new("test_net", layers, 1.0, 5 as f32).unwrap();
-//
-//        //FITNESS FUNCTION//
-//        //TODO: auto gen labels from outputs and fitness function.
-//
-//        //TRAIN//
-//        let mut rrng = rand::thread_rng();
-//        let mut inputs = Vec::new();
-//        let mut outputs = Vec::new();
-//        // create 100 entries for inputs and outputs of xor
-//        for _ in 0..1000 {
-//            // instead of the above, generate either 0 or 1 and cast to f32
-//            let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
-//            let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
-//
-//            inputs.push(input);
-//            outputs.push(output);
-//        }
-//
-//        norm_net.train(inputs, outputs).unwrap();
-//    }
-//
-//    #[test]
-//    fn test_serialization() {
-//        log::debug!("test_serialization");
-//        //call the main function
-//        use crate::*;
-//
-//        //CONSTRUCTION//
-//        let mut norm_net = Brain::new("test_serialization",2, 1, 20, 15, layers::std_layer(), activations::tanh(10), 0.01, 5 as f32).unwrap();
-//        //TRAIN//
-//        let mut rrng = rand::thread_rng();
-//        let mut inputs = Vec::new();
-//        let mut outputs = Vec::new();
-//        // create 100 entries for inputs and outputs of xor
-//        for _ in 0..10 {
-//            // instead of the above, generate either 0 or 1 and cast to f32
-//            let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
-//            let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
-//
-//            inputs.push(input);
-//            outputs.push(output);
-//        }
-//
-//        norm_net.train(inputs.clone(), outputs.clone()).unwrap();
-//
-//        // save the network
-//        norm_net
-//            .save()
-//            .unwrap();
-//
-//        //load the network
-//        let mut path = "".to_string();
-//        //NOTE: dont ever call a string something else in your crates or someone I know will find you.
-//        let _ = std::path::PathBuf::new();
-//        for entry in fs::read_dir("test_serialization/").unwrap() {
-//            let entry = entry.unwrap();
-//            let is_dir = entry.path();
-//            if !is_dir.is_dir() {
-//                continue;
-//            } else {
-//                path = is_dir.clone().to_str().unwrap().to_string();
-//            }
-//            log::debug!("{:?}", path);
-//        }
-//        let path = path.to_string();
-//        log::debug!("{:?}", path);
-//
-//        norm_net.load(path.to_string()).unwrap();
-//
-//        norm_net.train(inputs, outputs).unwrap();
-//    }
-//
-//    #[test]
-//    fn test_checkpoint(){
-//        log::debug!("test_checkpoint");
-//        use crate::*;
-//        //CONSTRUCTION//
-//        let mut norm_net = Brain::new("test_checkpoint",2, 1, 200, 96, layers::std_layer(), activations::tanh(10), 10.0, 5 as f32).unwrap();
-//        //TRAIN//
-//        let mut rrng = rand::thread_rng();
-//        // create entries for inputs and outputs of xor
-//        //TODO: window size and trag_iterations is hyperparameter for arch search. they should exist in shared struct or function parameter
-//        //TODO: how can we train this in RL? need to store window and selection_pressure in class state
-//        //TODO: this needs to happen on initialization
-//        for _ in 0..15{
-//            let mut inputs = Vec::new();
-//            let mut outputs = Vec::new();
-//            for _ in 0..10 {
-//                // instead of the above, generate either 0 or 1 and cast to f32
-//                let input = vec![(rrng.gen::<u8>() & 1) as f32, (rrng.gen::<u8>() & 1) as f32];
-//                let output = vec![(input[0] as u8 ^ input[1] as u8) as f32];
-//
-//                inputs.push(input);
-//                outputs.push(output);
-//            }
-//            // TEST TRAIN
-//            norm_net.train_checkpoint_search(inputs.clone(), outputs.clone(),  2).unwrap();
-//
-//            // TEST LOAD
-//            norm_net.load_checkpoint_search(0.001).unwrap();
-//        }
-//    }
-//    #[test]
-//    fn test_infer(){
-//        log::debug!("test_inference");
-//        use crate::*;
-//        //CONSTRUCTION//
-//        let mut norm_net = Brain::new("test_inference",2, 1, 200, 96, layers::std_layer(), activations::tanh(10), 10.0, 5 as f32).unwrap();
-//        //TRAIN//
-//        let mut rrng = rand::thread_rng();
-//        // create entries for inputs and outputs of xor
-//        for _ in 0..10{
-//            let mut inputs:Tensor<f32> = Tensor::new(&[1u64, 2 as u64]);
-//            let res: Tensor<f32>= norm_net.infer(inputs).unwrap();
-//        }
-//    }
-//    #[test]
-//    fn test_evaluate(){
-//        log::debug!("test_evaluate");
-//        use crate::*;
-//        //CONSTRUCTION//
-//        let layers = vec![layers::std_layer(), layers::std_layer()];
-//        let mut norm_net = Brain::new("test_evaluate",2, 1, 200, 96, layers::std_layer(), activations::tanh(10), 1.0, 10 as f32).unwrap();
-//        //TRAIN//
-//        let mut rrng = rand::thread_rng();
-//
-//        //TODO: this doesnt make much sense since we arent implementing state-action-reward tables
-//        let fitness_function = Box::new(|outputs: &Tensor<f32>| -> Tensor<f32> {
-//            //TODO: which scalars in the output vector do we want to maximize? a good default fitness function
-//            //      is a scalar constant to each entry in the vector or power term.
-//            //pass a function with a derivative that goes to zero or 1?
-//            let mut res_tensor = Tensor::new(outputs.dims());
-//            res_tensor[0] = outputs[0]/outputs[0];
-//            res_tensor
-//        });
-//        // create entries for inputs and outputs of xor
-//        for _ in 0..30{
-//            // same as above but push a vec with two random floats
-//            let inputs = vec![(rrng.gen::<f32>()), (rrng.gen::<f32>())];
-//            let res: Tensor<f32> =  norm_net.evaluate(inputs, 1, fitness_function.clone()).unwrap();
-//        }
-//
-//        //SEARCH RECOVERED MODEL:
-//        norm_net.load_checkpoint_search(0.001).unwrap();
-//        for _ in 0..10{
-//            let inputs = vec![(rrng.gen::<f32>()), (rrng.gen::<f32>())];
-//            let res: Tensor<f32> =  norm_net.evaluate(inputs, 1, fitness_function.clone()).unwrap();
-//        }
-//    }
-//    //TODO: test layer modularity
-//    // #[test]
-//    // fn test_architectures(){}
-//}

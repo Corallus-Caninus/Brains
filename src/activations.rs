@@ -29,4 +29,29 @@ pub fn Relu() -> Activation {
 pub fn Elu() -> Activation {
     Some(Box::new(move |output, scope| ops::elu(output, scope)))
 }
+pub fn Dropout(DataType: tensorflow::DataType) -> Activation {
+    Some(Box::new(move |output, scope| {
+        //implement an op that does x^3/3
+        let three = ops::constant(3.0 as f32, scope)?;
+        //let scale = ops::Cast::new()
+        //    .SrcT(DataType::Float)
+        //    .DstT(dtype.clone())
+        //    .build(scale, scope)?;
+        let three = ops::Cast::new()
+            .SrcT(DataType::Float)
+            .DstT(DataType)
+            .build(three.clone(), scope)?;
+        let cube = ops::mul(
+            ops::mul(
+                ops::mul(output.clone(), output.clone(), scope)?,
+                output.clone(),
+                scope,
+            )?,
+            output.clone(),
+            scope,
+        )?;
+        let dropout = ops::div(cube, three, scope)?;
+        Ok(dropout)
+    }))
+}
 //etc..
