@@ -4,7 +4,7 @@ version = "0.2.0"
 authors = ["Corallus-Caninus <ward.joshua92@yahoo.com>"]
 edition = "2021"
 description = "Rust based Artificial Neural Network framework with TensorFlow"
-license = "GNU"
+license = "GPL-3.0"
 
 [profile.release]
 lto=true
