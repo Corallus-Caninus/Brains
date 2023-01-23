@@ -2,6 +2,9 @@
 name = "InheritDerive"
 version = "0.1.0"
 edition = "2021"
+description = "InheritDerive"
+license = "GNU"
+Release = "0.1.0"
 
 #this is a lib crate
 [lib]
