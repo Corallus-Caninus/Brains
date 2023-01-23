@@ -1,7 +1,7 @@
 # Brains
 NOTE: this project is very early and was spawned from my own architecture research. contributions, opinions and issues are very welcome! Version 1.X.X will be considered ready for public use.
 
-an Artificial Neural Network framework built on Tensorflow-rs bindings for creating architectures similar to keras but also with direct integration for custom layers in low level Tensorflow. Includes native checkpointing, inference, batch trainning and iterative trainning. See the unittests to get an idea of how things are called until documentation is created. Also ensure to enable the GPU flag for tensorflow if you want to offload computation.
+an Artificial Neural Network framework built on Tensorflow-rs bindings for creating architectures similar to keras but also with direct integration for custom layers in low level Tensorflow. Includes native checkpointing, inference, batch trainning and iterative trainning. See the unittests to get an idea of how things are called until documentation is created. Also ensure to enable or disable the GPU feature for tensorflow if you want to offload computation.
 
 Currently all inputs and outputs are represented as flattend 1D rust Vecs.
 
