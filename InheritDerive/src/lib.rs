@@ -90,6 +90,7 @@ pub fn derive_inherit_state(input: TokenStream) -> TokenStream {
                     &self.layer_state
                 }
             }
+            //TODO: this needs to add all the custom local variables (not in LayerState) to the struct
             impl InitializeLayer for #name {
                 fn init() -> Self {
                     #name {
@@ -109,14 +110,5 @@ pub fn derive_inherit_state(input: TokenStream) -> TokenStream {
             }
         };
         gen.into()
-        //let gen = quote! {
-        //        impl InheritState for #name {
-        //            fn get_mut_layer_state(&mut self) -> &mut LayerState {
-        //                &mut self.0
-        //            }
-        //            fn get_layer_state(&self) -> &LayerState {
-        //                &self.0
-        //            }
-        //}
     }
 }

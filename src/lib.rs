@@ -133,6 +133,7 @@ where
 
 //create a trait for BuildLayer + AccessLayer + ConfigureLayer
 //TODO: we use NoChain since dyn cant return Self
+///holds builder state for the Brain structure
 pub struct BrainBuilder<'a> {
     //Layer: BuildLayer + AccessLayer + ConfigureLayerNoChain> {
     name: &'a str,
@@ -142,7 +143,7 @@ pub struct BrainBuilder<'a> {
     error: Option<LossFunction>,
     layers: Vec<Box<dyn Layer>>,
 }
-///Constructor to initialize the BrainBuilder
+///Constructor to initialize a BrainBuilder
 pub fn Brain<'a>() -> BrainBuilder<'a> {
     BrainBuilder {
         name: "Brain",
@@ -202,6 +203,7 @@ impl<'a> BrainBuilder<'a>
 }
 
 //TODO: what else should be exposed as brain state? e.g.: dtype?
+///The ANN master class
 pub struct Brain<'a> {
     /// Tensorflow objects for user abstraction from Tensorflow
     scope: &'a mut Scope,
@@ -231,6 +233,7 @@ pub struct Brain<'a> {
 impl<'a> Brain<'a> {
     //TODO: type safety: use trait bounds to allow for using bigints etc for counting//indexing
     //      types.
+    ///Constructor for Brain 
     pub fn new(
         name: String,
         //TODO: a vec of layers here will suffice for now, but this will be a builder pattern as
@@ -348,7 +351,7 @@ impl<'a> Brain<'a> {
         Ok(init_brain)
     }
 
-    ///save all Brain state
+    ///save all Brain state not in the tensorflow GraphAPI to disk
     fn serialize_network(&self, dir: String) -> Result<(), Box<dyn Error>> {
         let name = self.name.clone();
         // create a serialized_network object
@@ -480,7 +483,7 @@ impl<'a> Brain<'a> {
         Ok(())
     }
 
-    ///feed in the given input and label tensors and run the session
+    ///feed in the given input and label tensors and run a tensorflow graph session
     pub fn feed<'b, 'c: 'b, T>(
         mut run_args: SessionRunArgs<'b>,
         Input: &'c Operation,
@@ -501,9 +504,9 @@ impl<'a> Brain<'a> {
     ///
     ///**PARAMETERS**:
     ///
-    /// * inputs: the inputs to the network as a collection of flattened 1D vector
+    /// * inputs: the inputs to the network as a collection of flattened 1D Collection 
     ///
-    /// * labels: the labels for the inputs as a collection of flattened 1D vector
+    /// * labels: the labels for the inputs as a collection of flattened 1D Collection 
     ///
     pub fn train<T, I, const Ilen: usize, L, const Llen: usize>(
         &mut self,
@@ -582,8 +585,8 @@ impl<'a> Brain<'a> {
     //TODO: search iterations should see different datasets/epochs of dataset (not actual epoch backprop) via k-folding
     //      also cross validate the k-fold
 
-    ///Infer a given batch of inputs, returning the ordered outputs as a vector. This does not
-    ///update the parameters or perform backpropagation.
+    ///Infer a given batch of inputs, returning the outputs as a vector. This does not
+    ///update the graph parameters or perform backpropagation.
     pub fn infer<'b, T, I, const Ilen: usize>(
         &mut self,
         inputs: I,
@@ -713,9 +716,6 @@ mod tests {
             .num_inputs(2)
             //TODO: it would be nice if there was compile time warning if the target device ISA
             //      doesnt support the given type (also for tf_ops)
-            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
-            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
-            .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
             .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
             .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))
             .add_layer(fully_connected_zero_init::layer(2000, activations::Elu()))

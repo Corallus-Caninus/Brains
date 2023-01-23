@@ -62,6 +62,7 @@ pub trait BuildLayer {
     ///Build and insert the layer configuration into the tensorflow graph
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status>;
 }
+///accessors for shared state of a layer
 pub trait AccessLayer {
     fn get_input(&self) -> &Option<Operation>;
     fn get_input_size(&self) -> u64;
@@ -70,8 +71,7 @@ pub trait AccessLayer {
     fn get_activation(&self) -> &Activation;
     fn get_dtype(&self) -> DataType;
 }
-///A trait that defines the standard layer parameters via getters
-///and setters that can mutably configure layers, used by internal network builder.
+///setters for shared state of a layer that can be method chained
 pub trait ConfigureLayer {
     fn input(self, input: Operation) -> Self;
     fn input_size(self, input_size: u64) -> Self;
@@ -80,6 +80,7 @@ pub trait ConfigureLayer {
     fn activation(self, activation: Activation) -> Self;
     fn dtype(self, dtype: DataType) -> Self;
 }
+///Setters for shared state of a layer that dont return self
 pub trait ConfigureLayerNoChain {
     fn input(&mut self, input: Operation);
     fn input_size(&mut self, input_size: u64);
@@ -109,11 +110,14 @@ where
         Box::new(Self::init().width(width).activation(activation))
     }
 }
+//TODO: resolve ConfigureLayer vs ConfigureLayerNoChain with a blanket impl
+///master trait for traits that define a layers required methods
 pub trait Layer: BuildLayer + AccessLayer + ConfigureLayerNoChain + InheritState {}
 impl<L> Layer for L where L: BuildLayer + AccessLayer + ConfigureLayerNoChain + InheritState {}
 
 //FUNDAMENTAL LAYER STATE//
-///A subset of concrete state standardized to define any layer in tf.
+///A subset of concrete state standardized to define any layer in tf. Used as a foundation for
+///adding new layers to the framework and inherently derives accessors and setters.
 pub struct LayerState {
     input: Option<Operation>, //this trait bound is named O1 in tensorflow-rust
     //input output vector sizes
@@ -204,22 +208,24 @@ impl InitializeLayer for LayerState {
     }
 }
 ///A layer that has been added to a graph with its Output and backing
-///Operation ready to be assigned and trainnable variables exposed.
+///Operation ready to be assigned and trainnable variables (parameters) exposed.
 pub struct TrainnableLayer {
     pub variables: Vec<Variable>,
     pub output: Output,
     pub operation: Operation,
 }
 
+///process a type, adding it to the graph and returning a TrainnableLayer
 pub trait BuildNetwork {
     fn build(self, Scope: &mut Scope) -> Result<Vec<TrainnableLayer>, Status>;
 }
 //TODO: this should be a derive macro for any T | T.0 = LayerState
+///accessors to get the underlying inherited LayerState
 pub trait InheritState {
     fn get_mut_layer_state(&mut self) -> &mut LayerState;
     fn get_layer_state(&self) -> &LayerState;
 }
-///blanket for optional inherited layer state
+//blanket for optional inherited layer state
 impl<L> ConfigureLayer for L
 where
     L: InheritState,
@@ -303,6 +309,7 @@ where
 //likely end up doing this yourself otherwise.
 //NOTE: currently AccessLayer and ConfigureLayer are manditory for integrating into Brains so the
 //optional inheritence pattern is *currently* the standard for extensibility
+///a fully connected layer
 #[derive(InheritState)]
 pub struct fully_connected(LayerState);
 impl BuildLayer for fully_connected {
@@ -368,6 +375,8 @@ impl BuildLayer for fully_connected {
     }
 }
 
+///a fully connected layer with zero initialized weights (to allow all ops to run on GPU since
+///initializers complain that they require CPU device with scope.device("/gpu:0") )
 #[derive(InheritState)]
 pub struct fully_connected_zero_init(LayerState);
 impl BuildLayer for fully_connected_zero_init {
@@ -384,18 +393,6 @@ impl BuildLayer for fully_connected_zero_init {
         for i in 0..output_size {
             init_bias[i as usize] = 0.0 as f32;
         }
-
-        //        let w = Variable::builder()
-        //            .initial_value(
-        //                ops::RandomStandardNormal::new()
-        //                    .dtype(dtype)
-        //                    .build(w_shape, scope)?,
-        //            )
-        //            .data_type(dtype)
-        //            .shape([input_size, output_size])
-        //            .build(&mut scope.with_op_name("w"))?;
-        //initialize to zero
-        //figure out which DataType dtype is (e.g. the enum maps to f32 f64 etc.
 
         let init_w = ops::constant(
             Tensor::new(&[input_size as u64, output_size as u64])
@@ -457,45 +454,7 @@ impl BuildLayer for fully_connected_zero_init {
 ///================
 /// A standard fully connected layer without bias trainnable parameters
 /// instead normalizing and dropping out connections at each node.
-///
-/// NOTE: currently inputs and outputs must be flattened if representing >1 dim data
-///
-/// #
-/// PROS:
-///
-/// * better exploration by removing instabilities inherent to bias
-///
-/// * gradient based connection-wise dropout with tan weights
-///
-/// * better transfer learning by removing bias connections
-///
-/// * ~shouldn't~ have exploding gradient although vanishing gradient may be possible due to normalizing division.
-///
-/// * technically connection wise dropout is divisive (top down) architecture search (e.g.: the opposite of NEAT (bottom up) which is agglomerative)
-///
-/// CONS:
-/// * may be slower due to more operations (division)
-///
-/// * input and output must/should be tailored for normalized input/output (standard data science practices)
-///
-/// * needs large type precision for stability, but the stability can be tuned (as apposed to bias which needs architectural considerations)
-///
-/// #
-/// NOTE: parameters goes to zero whereas biases find some 1-dimensional partition from -inf to inf. This helps
-/// build subgraph search modules (subtrees essentially). That can quickly optimize for distinct domains and labels via dropout.
-///
-/// NOTE:
-/// the activation function should be bounded -1 > x > 1
-///
-/// NOTE:
-/// We dont use BFloat since the integer range is only used as a buffer for addition overflow in matmul.
-/// In all other operations we are strictly bounded -1 > x > 1. As long as layer_width is not
-/// greater than Float range we are fine in the worst case (summing all 1's).
-/// Otherwise decimal precision of float type is our parameter type precision.
 #[derive(InheritState)]
-//pub struct norm {
-//    pub layer_state: LayerState,
-//}
 pub struct norm(LayerState);
 impl BuildLayer for norm {
     fn build_layer(&self, scope: &mut Scope) -> Result<TrainnableLayer, Status> {
@@ -546,8 +505,11 @@ impl BuildLayer for norm {
         })
     }
 }
-//TODO: scale layer, just multiplies by a constant
-///scale
+//TODO: should we have a layer that doesnt activate instead and let this be learned by weights? can
+//just add another layer or a conditional builder for layers (is_last: bool)
+///A layer that multiplies each entry in the previous Tensor by a constant, usually a multiple of
+///10. This allows last layer activation to express values beyond squashing where necessory
+/// (sigmoid, tanh, and all other bounded activation functions.)
 #[derive(InheritState)]
 pub struct scale {
     pub layer_state: LayerState,
